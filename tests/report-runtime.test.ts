@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { Glob } from "bun";
 import { Miniflare } from "miniflare";
-import { initialize } from "../src/config";
+import { initializeTestDb as initialize } from "./db";
 import { ingest } from "../src/core";
 import { resolveReport, runReports } from "../src/reports";
 import { testConfig } from "./db";

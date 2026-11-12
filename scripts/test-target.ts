@@ -13,9 +13,16 @@ export function describeTestTarget(config: {env:{test:{name:string;vars:Record<s
     || !/^[1-9][0-9]*(?:,[1-9][0-9]*)*$/.test(v.ADMIN_IDS ?? "")
     || [botId,v.ALLOWED_CHAT_IDS,...v.ADMIN_IDS!.split(",")].some(id => !Number.isSafeInteger(Number(id))))
     throw new Error("TEST target contains placeholders, multiple source chats, or an unapproved name/identity");
+  // Only the synthetic local bot is enrolled here. Remote cutoff always needs separate operator verification.
+  const quote = (value: string) => "'" + value.replaceAll("'", "''") + "'";
+  if(local && (!Number.isSafeInteger(Number(v.GOAL)) || Number(v.GOAL)<=0)) throw new Error("Invalid local goal");
+  const localIntakeSql = local ? `
+INSERT INTO campaigns(id,timezone,start_day,goal,report_chat_id) VALUES(${quote(v.CAMPAIGN_ID!)},${quote(v.TIMEZONE!)},${quote(v.CAMPAIGN_START!)},${Number(v.GOAL)},${v.REPORT_CHAT_ID}) ON CONFLICT(id) DO NOTHING;
+INSERT INTO chat_aliases(chat_id,campaign_id) VALUES(${v.ALLOWED_CHAT_IDS},${quote(v.CAMPAIGN_ID!)}) ON CONFLICT(chat_id) DO NOTHING;
+INSERT INTO automatic_intake_boundaries(campaign_id,chat_id,first_message_id,reason,approved_by,created_at) VALUES(${quote(v.CAMPAIGN_ID!)},${v.ALLOWED_CHAT_IDS},1,'Synthetic local messages only',123456,1) ON CONFLICT(campaign_id,chat_id) DO NOTHING;` : "";
   return {environment:"test",workerName:test.name,databaseName:db.database_name,databaseId:db.database_id,
     campaignId:v.CAMPAIGN_ID,botId:Number(botId),sourceChatIds:v.ALLOWED_CHAT_IDS,reportChatId:v.REPORT_CHAT_ID,
-    enrollmentSql:`INSERT INTO deployment_identity(singleton,environment,database_id,campaign_id,bot_id,source_chat_ids,report_chat_id) VALUES(1,'test','${db.database_id}','${v.CAMPAIGN_ID}',${botId},'${v.ALLOWED_CHAT_IDS}',${v.REPORT_CHAT_ID}) ON CONFLICT(singleton) DO NOTHING;`};
+    enrollmentSql:`INSERT INTO deployment_identity(singleton,environment,database_id,campaign_id,bot_id,source_chat_ids,report_chat_id) VALUES(1,'test','${db.database_id}','${v.CAMPAIGN_ID}',${botId},'${v.ALLOWED_CHAT_IDS}',${v.REPORT_CHAT_ID}) ON CONFLICT(singleton) DO NOTHING;${localIntakeSql}`};
 }
 if(import.meta.main) {
   const args = Bun.argv.slice(2);

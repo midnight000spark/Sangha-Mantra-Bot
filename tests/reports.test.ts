@@ -14,6 +14,7 @@ async function fixture() {
     VALUES (?, ?, ?, ?, ?)`).bind(config.campaignId, config.timezone, config.startDay, config.goal, config.reportChatId).run();
   await db.prepare(`INSERT INTO chat_aliases(chat_id,campaign_id) VALUES (?,?)`)
     .bind(config.allowedChatIds[0]!, config.campaignId).run();
+  await db.prepare("INSERT INTO automatic_intake_boundaries VALUES(?,-1001,1,NULL,'Synthetic fixture',42,1)").bind(config.campaignId).run();
   return db;
 }
 

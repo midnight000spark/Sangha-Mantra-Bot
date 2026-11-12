@@ -206,7 +206,7 @@ export async function handleAdminDialog(db: D1Database, config: Config, input: {
         callback_data: `au:r:${r.source_chat_id}:${r.message_id}` }]) } : undefined,
     }); return true;
   }
-  if (text.startsWith("/") && !message!.reply_to_message_id) return false;
+  if (text.startsWith("/")) return false;
   const link = parseMessageLink(text);
   if (link) {
     const chatId = link.chatId ?? await resolveTelegramGroup(token, link.username!);

@@ -23,7 +23,7 @@
         "MAX_AMOUNT": "1000000",
         "ALLOWED_CHAT_IDS": "-1001234567890",
         "REPORT_CHAT_ID": "-1001234567890",
-        "ADMIN_IDS": "123456789"
+        "ADMIN_IDS": "876543210"
       },
       "d1_databases": [
         {
@@ -50,7 +50,7 @@
         "MAX_AMOUNT": "1000000",
         "ALLOWED_CHAT_IDS": "-1001234567891",
         "REPORT_CHAT_ID": "-1001234567891",
-        "ADMIN_IDS": "123456789",
+        "ADMIN_IDS": "876543210",
         "DEPLOYMENT_ENV": "production",
         "EXPECTED_BOT_ID": "999000111",
         "EXPECTED_D1_ID": "66666666-7777-4888-8999-aaaaaaaaaaaa"

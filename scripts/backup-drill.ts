@@ -31,6 +31,8 @@ try {
   await Bun.write(sourceSql, migrations.join("\n") + `
 INSERT INTO campaigns(id,timezone,start_day,goal,report_chat_id) VALUES('drill','Europe/Moscow','2026-11-01',1000000,-100123);
 INSERT INTO chat_aliases(chat_id,campaign_id) VALUES(-100123,'drill');
+INSERT INTO automatic_intake_boundaries VALUES('drill',-100123,1,NULL,'Verified local fixture',42,1);
+INSERT INTO campaign_controls(campaign_id,silent,changed_at,changed_by) VALUES('drill',1,1794344700000,42);
 INSERT INTO contributions(source_chat_id,message_id,campaign_id,original_date,local_day,user_id,source_amount,source_state,version_date,is_edit,last_event_key,updated_at)
 VALUES(-100123,1,'drill',1794300000,'2026-11-10',42,1000,'VALID',1794300000,0,'drill-1',1794300000000),
       (-100123,2,'drill',1794300001,'2026-11-10',42,2000,'VALID',1794300001,0,'drill-2',1794300001000),
@@ -60,6 +62,8 @@ INSERT INTO notices(notice_key,campaign_id,chat_id,body,state,created_at) VALUES
   assert.deepEqual(database.query("SELECT DISTINCT status FROM daily_reports").all(), [{ status: "UNCERTAIN" }]);
   assert.deepEqual(database.query("SELECT state FROM notices").get(), { state: "UNCERTAIN" });
   assert.deepEqual(database.query("SELECT COUNT(*) AS count FROM report_audit").get(), { count: 4 });
+  assert.deepEqual(database.query("SELECT silent FROM campaign_controls").get(), { silent: 1 });
+  assert.deepEqual(database.query("SELECT first_message_id FROM automatic_intake_boundaries").get(), { first_message_id: 1 });
   database.close();
   // Verify that the production SQL recovery output includes the persisted pause too.
   const reimported = new Database(":memory:");
@@ -76,7 +80,7 @@ INSERT INTO notices(notice_key,campaign_id,chat_id,body,state,created_at) VALUES
   await assert.rejects(readBackup(archive));
   console.log(JSON.stringify({ result: "PASS", scope: "Local Wrangler D1 export, AES-GCM archive, separate SQLite restore",
     contributions: 3, eventLogEntries: 3, total: "3108", generatedColumnVerified: true,
-    reportTriggersVerified: true, recoveryPauseVerified: true, lossWindowVerified: true,
+    reportTriggersVerified: true, silenceAndBoundaryPreserved: true, recoveryPauseVerified: true, lossWindowVerified: true,
     sqlReimportVerified: true, tamperingRejected: true, wrongKeyRejected: true,
     remoteCloudflareTested: false, offAccountStorageTested: false }, null, 2));
 } finally {

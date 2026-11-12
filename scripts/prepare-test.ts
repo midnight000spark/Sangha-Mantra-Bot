@@ -2,7 +2,14 @@ import { mkdir, open, chmod } from "node:fs/promises";
 import { telegram } from "./test-safety";
 
 async function main() {
+  const args = Bun.argv.slice(2);
+  if(args.some(v=>v!=="--maintenance") || args.length>1) throw new Error("Only --maintenance is supported");
+  const maintenance=args.includes("--maintenance");
+  const privateFile=maintenance ? ".secrets/.env.ops.maintenance.test" : ".secrets/.env.ops.test";
+  const metadataFile=maintenance ? ".secrets/test-resources-maintenance.json" : ".secrets/test-resources.json";
   const token = process.env.BOT_TOKEN;
+  if(maintenance && token?.split(":")[0] === (await Bun.file("wrangler.jsonc").json()).env.production.vars.EXPECTED_BOT_ID)
+    throw new Error("Maintenance tests require a separate bot; production credentials are refused");
   const username = process.env.TEST_BOT_USERNAME?.replace(/^@/,"");
   if (!token || !/^[1-9][0-9]*:[A-Za-z0-9_-]{20,}$/.test(token) || !username || !/^[a-z0-9_]+bot$/i.test(username))
     throw new Error("Enter the separate TEST bot username and token in the user terminal");
@@ -28,16 +35,16 @@ async function main() {
     ALLOWED_CHAT_IDS:String(groupIds[0]), REPORT_CHAT_ID:String(groupIds[0]),
     MAX_EVENT_AGE_HOURS:"0",
   };
-  const file = await open(".secrets/.env.ops.test","wx",0o600);
+  const file = await open(privateFile,"wx",0o600);
   try { await file.writeFile(Object.entries(values).map(([k,v])=>`${k}=${JSON.stringify(v)}`).join("\n")+"\n"); }
   finally { await file.close(); }
   // Metadata only: safe for the agent to inspect; never includes a token, key, or secret.
-  const metadata = await open(".secrets/test-resources.json","wx",0o600);
+  const metadata = await open(metadataFile,"wx",0o600);
   try { await metadata.writeFile(JSON.stringify({environment:"test",botId:me.id,botUsername:me.username,
     groupIds,candidateAdminIds:senderIds,workerName:"sangha-mantra-bot-test",databaseName:"sangha-mantra-test"},null,2)+"\n"); }
   finally { await metadata.close(); }
   console.log(JSON.stringify({prepared:true,botUsername:me.username,botId:me.id,groupIds,candidateAdminIds:senderIds,
-    privateFile:".secrets/.env.ops.test",pendingUpdatesRetained:true}));
+    privateFile,pendingUpdatesRetained:true}));
   console.log("Keep the backup key separately with the responsible operators. Do not paste the private file into chat.");
 }
 if (import.meta.main) main().catch(error => { console.error(error instanceof Error ? error.message : "TEST preparation failed"); process.exitCode=1; });

@@ -82,3 +82,12 @@ test("health setup failure reports only HTTP status and never changes webhook", 
   expect(message).toContain("HTTP 503");expect(message).not.toContain(env.WEBHOOK_SECRET);
   expect(methods).not.toContain("setWebhook");
 });
+
+test("local enrollment explicitly seeds a synthetic intake boundary; remote enrollment never guesses one", async()=>{
+  const {describeTestTarget}=await import("../scripts/test-target");
+  const config=await Bun.file("wrangler.jsonc").json();
+  const local=describeTestTarget(config,true);
+  expect(local.enrollmentSql).toContain("INSERT INTO automatic_intake_boundaries");
+  expect(local.enrollmentSql).toContain("Synthetic local messages only");
+  expect(describeTestTarget(config).enrollmentSql).not.toContain("INSERT INTO automatic_intake_boundaries");
+});

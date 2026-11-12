@@ -15,6 +15,8 @@ export async function ingest(db: D1Database, config: Config, event: Contribution
        user_id,version_date,is_edit,source_amount,source_state,reason,outcome,old_amount,received_at)
       SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,
         CASE
+          WHEN c.message_id IS NULL AND ((b.first_message_id IS NOT NULL AND ? < b.first_message_id)
+            OR (b.original_not_before IS NOT NULL AND ? < b.original_not_before)) THEN 'REJECTED'
           WHEN ? < ? THEN 'REJECTED'
           WHEN c.message_id IS NULL THEN 'APPLIED'
           WHEN c.original_date != ? THEN 'NEEDS_REVIEW'
@@ -24,13 +26,15 @@ export async function ingest(db: D1Database, config: Config, event: Contribution
           WHEN c.source_amount = ? AND c.source_state = ? THEN 'UNCHANGED'
           ELSE 'NEEDS_REVIEW'
         END, COALESCE(c.effective_amount,0), ?
-      FROM chat_aliases a LEFT JOIN contributions c
+      FROM chat_aliases a
+      LEFT JOIN automatic_intake_boundaries b ON b.chat_id=a.chat_id AND b.campaign_id=a.campaign_id
+      LEFT JOIN contributions c
         ON c.source_chat_id=a.chat_id AND c.message_id=?
-      WHERE a.chat_id=? AND a.campaign_id=?
+      WHERE a.chat_id=? AND a.campaign_id=? AND (b.chat_id IS NOT NULL OR c.message_id IS NOT NULL)
       ON CONFLICT(event_key) DO NOTHING`).bind(
       event.key,nonce,event.updateId,event.chatId,event.messageId,config.campaignId,event.originalDate,day,
       event.userId,event.versionDate,Number(event.isEdit),event.amount,event.state,event.reason,
-      day,config.startDay,event.originalDate,
+      event.messageId,event.originalDate,day,config.startDay,event.originalDate,
       event.versionDate,event.versionDate,Number(event.isEdit),
       event.versionDate,event.versionDate,Number(event.isEdit),event.amount,event.state,event.now,
       event.messageId,event.chatId,config.campaignId),
@@ -58,7 +62,7 @@ export async function ingest(db: D1Database, config: Config, event: Contribution
       COALESCE(c.source_state,'INVALID') AS source_state FROM event_log e LEFT JOIN contributions c
       ON c.source_chat_id=e.source_chat_id AND c.message_id=e.message_id WHERE e.event_key=?`)
     .bind(event.key).first<{outcome:string;reason:string|null;effective_amount:number;source_state:string}>();
-  if (!result) throw new Error("Contribution chat is not mapped to this campaign");
+  if (!result) throw new Error("Contribution chat is not mapped or its automatic intake boundary is not provisioned");
   return result;
 }
 

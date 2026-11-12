@@ -1,3 +1,4 @@
+import { initialize } from "../src/config";
 import { Database } from "bun:sqlite";
 import { Glob } from "bun";
 import type { Config } from "../src/types";
@@ -54,4 +55,12 @@ export async function createTestDb(): Promise<D1Database> {
 export async function seedIdentity(db: D1Database) {
   await db.prepare(`INSERT INTO deployment_identity VALUES(1,'test',?,'test',123456,'-1002,-1001',-1001)`)
     .bind("11111111-1111-1111-1111-111111111111").run();
+}
+
+/** Explicit synthetic enrollment, never used by production initialization. */
+export async function initializeTestDb(db: D1Database, config: Config) {
+  await initialize(db,config);
+  for(const chat of config.allowedChatIds) await db.prepare(`INSERT INTO automatic_intake_boundaries
+    (campaign_id,chat_id,first_message_id,reason,approved_by,created_at) VALUES(?,?,1,'Synthetic fixture boundary',42,1)
+    ON CONFLICT(campaign_id,chat_id) DO NOTHING`).bind(config.campaignId,chat).run();
 }

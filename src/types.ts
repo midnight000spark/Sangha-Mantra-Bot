@@ -1,4 +1,5 @@
 export interface Env {
+  TEST_INPUT_DIAGNOSTICS?: string;
   DB: D1Database;
   DEPLOYMENT_ENV: string;
   EXPECTED_D1_ID: string;

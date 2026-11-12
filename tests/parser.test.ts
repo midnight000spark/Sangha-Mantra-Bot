@@ -34,3 +34,13 @@ test("Telegram entity offsets use UTF-16 and exclude hidden links/code, not surr
   expect(parseAmount("1000",1_000_000,[{type:"bold",offset:0,length:4}]).amount).toBe(1000);
   expect(parseAmount("xx1000",1_000_000,[{type:"code",offset:0,length:2}]).amount).toBe(0);
 });
+
+test("one malformed numeric expression retains a warning rather than being mistaken for separate quantities",()=>{
+  for(const text of ["1.5","1010.5","1,000","1.000","12/11/2026","-1.5"])
+    expect(parseAmount(text,1_000_000)).toMatchObject({kind:"INVALID_NUMERIC",amount:0,multipleNumbers:false});
+});
+
+test("multiple independent quantities stay quiet even if one has an invalid fractional format",()=>{
+  for(const text of ["1000 и 2000","1.5 и 108","1000, 2000","1000 2000","2 раза по 108","1 000"])
+    expect(parseAmount(text,1_000_000)).toMatchObject({amount:0,multipleNumbers:true});
+});
