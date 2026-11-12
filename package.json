@@ -1,0 +1,28 @@
+{
+  "name": "sangha-mantra-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --env test",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "check": "bun run typecheck && bun test",
+    "build": "wrangler deploy --dry-run --env test --outdir dist",
+    "migrate:local": "wrangler d1 migrations apply DB --local --env test",
+    "backup": "bun scripts/backup.ts",
+    "restore": "bun scripts/restore.ts",
+    "backup:drill": "bun scripts/backup-drill.ts",
+    "monitor": "bun scripts/monitor.ts",
+    "webhook:set": "bun scripts/set-webhook.ts",
+    "deploy:test": "wrangler deploy --env test",
+    "deploy:production": "bun scripts/production-disabled.ts"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261110.1",
+    "@types/bun": "1.4.4",
+    "miniflare": "4.20260730.0",
+    "typescript": "7.0.2",
+    "wrangler": "4.160.0"
+  }
+}

@@ -1,0 +1,74 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "sangha-mantra-bot",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-07-01",
+  "workers_dev": true,
+  "observability": {
+    "enabled": true
+  },
+  "env": {
+    "test": {
+      "name": "sangha-mantra-bot-test",
+      "account_id": "00000000000000000000000000000000",
+      "vars": {
+        "DEPLOYMENT_ENV": "test",
+        "EXPECTED_BOT_ID": "999000111",
+        "EXPECTED_D1_ID": "11111111-2222-4333-8444-555555555555",
+        "CAMPAIGN_ID": "sangha-test",
+        "TIMEZONE": "Europe/Moscow",
+        "CAMPAIGN_START": "2026-11-12",
+        "REPORT_TIME": "00:05",
+        "GOAL": "1000000",
+        "MAX_AMOUNT": "1000000",
+        "ALLOWED_CHAT_IDS": "-1001234567890",
+        "REPORT_CHAT_ID": "-1001234567890",
+        "ADMIN_IDS": "123456789"
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "sangha-mantra-test",
+          "database_id": "11111111-2222-4333-8444-555555555555",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "triggers": {
+        "crons": [
+          "*/5 * * * *"
+        ]
+      }
+    },
+    "production": {
+      "name": "sangha-mantra-bot-production",
+      "vars": {
+        "CAMPAIGN_ID": "sangha-production",
+        "TIMEZONE": "Europe/Moscow",
+        "CAMPAIGN_START": "2026-11-12",
+        "REPORT_TIME": "00:05",
+        "GOAL": "1000000",
+        "MAX_AMOUNT": "1000000",
+        "ALLOWED_CHAT_IDS": "-1001234567891",
+        "REPORT_CHAT_ID": "-1001234567891",
+        "ADMIN_IDS": "123456789",
+        "DEPLOYMENT_ENV": "production",
+        "EXPECTED_BOT_ID": "999000111",
+        "EXPECTED_D1_ID": "66666666-7777-4888-8999-aaaaaaaaaaaa"
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "sangha-mantra-production",
+          "database_id": "66666666-7777-4888-8999-aaaaaaaaaaaa",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "triggers": {
+        "crons": [
+          "*/5 * * * *"
+        ]
+      },
+      "account_id": "00000000000000000000000000000000"
+    }
+  }
+}

@@ -1,0 +1,4 @@
+# Local ONLY. Copy to .dev.vars.test; never use these credentials for real Telegram.
+BOT_TOKEN="123456:local-test-token-do-not-send"
+WEBHOOK_SECRET="local-test-secret-at-least-16-characters"
+EXPECTED_BOT_ID="123456"
