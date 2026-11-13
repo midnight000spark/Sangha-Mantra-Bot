@@ -1,3 +1,4 @@
+import { isTestSender } from "./test-sender";
 import { telegramEnvelopeSummary } from "./diagnostics";
 import { silenceState } from "./controls";
 import { getConfig, initialize } from "./config";
@@ -86,6 +87,14 @@ export default {
       const key = await eventKey(update);
       const now = Date.now();
       const message = update.message ?? update.edited_message;
+      // TEST-only receipt of the allowlisted bot's real Telegram envelope. No human payloads.
+      if (message && message.sender_chat === undefined && message.forward_origin === undefined
+        && message.forward_date === undefined && !message.is_automatic_forward
+        && (isTestSender(config, message) || isTestSender(config, message, true))) {
+        await env.DB.prepare(`INSERT INTO operational_events(event_key,campaign_id,update_id,kind,source_chat_id,message_id,detail,created_at)
+          VALUES(?,?,?,'TEST_BOT_INPUT',?,?,?,?) ON CONFLICT(event_key) DO NOTHING`)
+          .bind(`test-bot:${key}`, config.campaignId, update.update_id, message.chat.id, message.message_id, JSON.stringify(update), now).run();
+      }
       let noticesQueued = false;
       let handled = false;
       if (update.callback_query) {
@@ -143,7 +152,7 @@ export default {
       }
       if (!handled && message && ["group", "supergroup"].includes(message.chat.type)) {
         const alias = await env.DB.prepare("SELECT chat_id FROM chat_aliases WHERE chat_id=? AND campaign_id=?").bind(message.chat.id, config.campaignId).first();
-        if (alias && !message.service && message.from && !message.from.is_bot && message.sender_chat === undefined
+        if (alias && !message.service && message.from && (!message.from.is_bot || isTestSender(config, message)) && message.sender_chat === undefined
           && message.forward_origin === undefined && message.forward_date === undefined && !message.is_automatic_forward) {
           const parsed = parseAmount(message.text, config.maxAmount, message.entities);
           // New conversation/media has no ledger row. Edits need a zero tombstone even
@@ -159,7 +168,7 @@ export default {
               const reason = result.outcome === "NEEDS_REVIEW"
                 ? "Версии сообщения неоднозначны. Вклад требует проверки ответственным за учёт."
                 : parsed.reason ?? result.reason ?? "Вклад не принят. Обратитесь к ответственному за учёт.";
-              if (parsed.kind !== "NO_NUMBER" && !parsed.multipleNumbers && result.outcome !== "REJECTED") {
+              if (parsed.kind !== "NO_NUMBER" && result.outcome !== "REJECTED") {
                 await enqueueNotice(env.DB, config, `rejected:${message.chat.id}:${message.message_id}`, message.chat.id, reason, now, message.message_id, (message.edit_date ?? message.date) * 1000);
                 noticesQueued = true;
               }

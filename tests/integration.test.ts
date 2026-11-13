@@ -338,7 +338,7 @@ describe("free conversation MVP regressions", () => {
     await edit("1000🙏",3);
     await edit("1000 и 2000",4);
     expect((await totals(env.DB,"test")).total).toBe("0");
-    expect(await env.DB.prepare("SELECT COUNT(*) n FROM notices").first("n")).toBe(0);
+    expect(await env.DB.prepare("SELECT COUNT(*) n FROM notices").first("n")).toBe(1);
     await edit("-100",5);
     expect(await env.DB.prepare("SELECT COUNT(*) n FROM notices").first("n")).toBe(1);
     await invoke(env,admin("/override -1001 1 500 Проверено",20));
@@ -436,20 +436,74 @@ test("opt-in TEST diagnostics persist structural evidence for ignored group cont
   expect((await totals(env.DB,"test")).total).toBe("0");
 });
 
-test("one fractional amount warns once outside silence; independent quantities and silence backlog stay quiet",async()=>{
+test("invalid numeric inputs warn once outside silence; silence backlog stays held",async()=>{
   const env=await environment();
   const {setSilence}=await import("../src/controls");
   const invalid=payload("1.5",601);
   expect((await invoke(env,invalid)).status).toBe(200);await invoke(env,invalid);
   expect(network).toHaveBeenCalledTimes(1);
-  await invoke(env,payload("1000 и 2000",602));expect(network).toHaveBeenCalledTimes(1);
+  await invoke(env,payload("1000 и 2000",602));expect(network).toHaveBeenCalledTimes(2);
   const now=Date.now();await setSilence(env.DB,testConfig,true,42,"fraction-silent-on",now);
-  await invoke(env,payload("2.5",603));expect(network).toHaveBeenCalledTimes(1);
+  await invoke(env,payload("2.5",603));expect(network).toHaveBeenCalledTimes(2);
   await setSilence(env.DB,testConfig,false,42,"fraction-silent-off",now+1);
-  await deliverNotices(env.DB,testConfig,env.BOT_TOKEN);expect(network).toHaveBeenCalledTimes(1);
+  await deliverNotices(env.DB,testConfig,env.BOT_TOKEN);expect(network).toHaveBeenCalledTimes(2);
   await invoke(env,payload("3.5",604,604,{date:Math.ceil(Date.now()/1000)+1}));
-  expect(network).toHaveBeenCalledTimes(2);
+  expect(network).toHaveBeenCalledTimes(3);
   expect(await env.DB.prepare("SELECT state,publication_hold FROM notices WHERE reply_message_id=603").first())
     .toEqual({state:"PENDING",publication_hold:1});
   expect((await totals(env.DB,"test")).total).toBe("0");
+});
+
+test("TEST bot intake and private administration require exact sender/chat and verified D1 identity", async () => {
+  const env=await environment();
+  env.TEST_SENDER_BOT_ID="101"; env.TEST_SENDER_CHAT_ID="-1001"; env.ADMIN_IDS="42,101";
+  await invoke(env,payload("108",701,701,{from:{id:101,is_bot:true}}));
+  expect((await totals(env.DB,"test")).total).toBe("108");
+  for(const extra of [{from:{id:102,is_bot:true}}, {from:{id:101,is_bot:true},chat:{id:-1002,type:"supergroup"}},
+    {from:{id:101,is_bot:true},sender_chat:{id:-1001}}, {from:{id:101,is_bot:true},forward_origin:{type:"user"}}]) {
+    await invoke(env,payload("108",702,702,extra));
+  }
+  expect((await totals(env.DB,"test")).total).toBe("108");
+  const dm=payload("/silent on",710,710,{date:Math.floor(Date.now()/1000),from:{id:101,is_bot:true},chat:{id:101,type:"private"}});
+  await invoke(env,dm);
+  expect(await env.DB.prepare("SELECT silent FROM campaign_controls").first("silent")).toBe(1);
+  await env.DB.prepare("UPDATE deployment_identity SET bot_id=654321").run();
+  expect((await invoke(env,payload("1000",711,711,{from:{id:101,is_bot:true}}))).status).toBe(503);
+  expect((await totals(env.DB,"test")).total).toBe("108");
+});
+
+test("TEST sender configuration fails closed for production, partial IDs, self and foreign chat", async()=>{
+  const {getConfig}=await import("../src/config");
+  const env=await environment();
+  for(const patch of [
+    {TEST_SENDER_BOT_ID:"101"}, {TEST_SENDER_CHAT_ID:"-1001"},
+    {TEST_SENDER_BOT_ID:"123456",TEST_SENDER_CHAT_ID:"-1001"},
+    {TEST_SENDER_BOT_ID:"101",TEST_SENDER_CHAT_ID:"-999"},
+    {TEST_SENDER_BOT_ID:"101,102",TEST_SENDER_CHAT_ID:"-1001"},
+    {DEPLOYMENT_ENV:"production",CAMPAIGN_ID:"sangha-production",ALLOWED_CHAT_IDS:"-1001234567891",REPORT_CHAT_ID:"-1001234567891",TEST_SENDER_BOT_ID:"101",TEST_SENDER_CHAT_ID:"-1001234567891"},
+  ]) expect(()=>getConfig({...env,...patch})).toThrow();
+});
+
+test("required numeric matrix, media and edits preserve one notice per source in both silence states",async()=>{
+  for(const silent of [false,true]) {
+    const env=await environment();
+    if(silent) {const {setSilence}=await import("../src/controls");await setSilence(env.DB,testConfig,true,42,"matrix-on",Date.now());}
+    const initialCalls=network.mock.calls.length;
+    const texts=["1000","1000🙏","10 и 10","1000 2000","1.5","0","Привет"];
+    for(const [i,text] of texts.entries()) {
+      const input=payload(text,800+i);await invoke(env,input);await invoke(env,input);
+    }
+    await invoke(env,payload("",810,810,{photo:[{file_id:"test"}],caption:"500"}));
+    await invoke(env,payload("",811,811,{video:{file_id:"test"},caption:"500"}));
+    expect((await totals(env.DB,"test")).total).toBe("2000");
+    expect(network.mock.calls.length-initialCalls).toBe(silent ? 0:4);
+    const base=payload("10 и 10",802).message;
+    for(const [i,text] of ["12 и 13","108","1.5","108"].entries()) {
+      const update={update_id:900+i,edited_message:{...base,text,edit_date:date+i+1}};
+      await invoke(env,update);await invoke(env,update);
+    }
+    expect((await totals(env.DB,"test")).total).toBe("2108");
+    expect(await env.DB.prepare("SELECT COUNT(*) n FROM notices WHERE reply_message_id=802").first("n")).toBe(1);
+    expect(network.mock.calls.length-initialCalls).toBe(silent ? 0:4);
+  }
 });

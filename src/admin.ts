@@ -1,3 +1,4 @@
+import { isTestSender } from "./test-sender";
 import { adminHelp, dateText, inspectText, number, stateText } from "./admin-text";
 import { silenceState, setSilence } from "./controls";
 import type { Config } from "./types";
@@ -79,7 +80,7 @@ export async function notifyOperators(db: D1Database, config: Config, now = Date
 
 
 export async function handleAdmin(db: D1Database, config: Config, message: TelegramMessage, key: string, now: number): Promise<boolean> {
-  if (message.chat.type !== "private" || !message.from || message.chat.id !== message.from.id || message.service || message.is_automatic_forward || message.from.is_bot
+  if (message.chat.type !== "private" || !message.from || message.chat.id !== message.from.id || message.service || message.is_automatic_forward || (message.from.is_bot && !isTestSender(config, message, true))
     || !config.adminIds.includes(message.from.id) || message.sender_chat !== undefined
     || message.forward_origin !== undefined || message.forward_date !== undefined) return false;
   const actorId = message.from.id;

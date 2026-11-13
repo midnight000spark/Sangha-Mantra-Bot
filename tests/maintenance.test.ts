@@ -174,7 +174,7 @@ test("Russian status and inspect, legacy JSON, correction/import/release confirm
   expect(await reply("reports")).not.toContain('[{'); expect(await reply("notices")).not.toContain('[{');
 });
 
-test("Worker restart/replayed webhook honors cutoff, silent commands in replies and quiet multi-number edits", async () => {
+test("Worker restart/replayed webhook honors cutoff, silent commands in replies and deduplicated multi-number warnings", async () => {
   await seedIdentity(db); await boundary(41);
   const env={DB:db,DEPLOYMENT_ENV:"test",EXPECTED_D1_ID:"11111111-1111-1111-1111-111111111111",EXPECTED_BOT_ID:"123456",BOT_TOKEN:"123456:local-token",WEBHOOK_SECRET:"local-secret-123456",ADMIN_IDS:"42",CAMPAIGN_ID:config.campaignId,TIMEZONE:config.timezone,CAMPAIGN_START:config.startDay,REPORT_TIME:config.reportTime,GOAL:"1000000",MAX_AMOUNT:"1000000",ALLOWED_CHAT_IDS:"-1001,-1002",REPORT_CHAT_ID:"-1001"} as Env;
   async function submit(payload:unknown, handler=worker) {
@@ -188,7 +188,7 @@ test("Worker restart/replayed webhook honors cutoff, silent commands in replies 
   await submit(old,fresh); expect((await totals(db,config.campaignId)).total).toBe("0");
   await submit({update_id:2,message:{...message,message_id:55,edit_date:undefined,text:"1000🙏"}});
   for(const [index,text] of ["2 раза по 108","1 000","1000 и 2000","Привет"].entries()) await submit({update_id:3+index,edited_message:{...message,message_id:55,edit_date:date+10001+index,text}});
-  expect((await totals(db,config.campaignId)).total).toBe("0"); expect(groupSends()).toHaveLength(0);
+  expect((await totals(db,config.campaignId)).total).toBe("0"); expect(groupSends()).toHaveLength(1);
   await submit({update_id:10,message:{message_id:100,date,chat:{id:42,type:"private"},from:{id:42,is_bot:false},text:"/silent on",reply_to_message:{message_id:99}}});
   expect((await silenceState(db,config.campaignId)).silent).toBe(1);
 });

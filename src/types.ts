@@ -1,5 +1,7 @@
 export interface Env {
   TEST_INPUT_DIAGNOSTICS?: string;
+  TEST_SENDER_BOT_ID?: string;
+  TEST_SENDER_CHAT_ID?: string;
   DB: D1Database;
   DEPLOYMENT_ENV: string;
   EXPECTED_D1_ID: string;
@@ -18,6 +20,7 @@ export interface Env {
 }
 
 export interface Config {
+  testSender?: { botId: number; chatId: number };
   deployment?: { environment?: "test" | "production"; databaseId: string; botId: number; sourceChatIds: string; reportChatId: number };
   campaignId: string;
   timezone: string;

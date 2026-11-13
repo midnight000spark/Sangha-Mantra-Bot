@@ -180,6 +180,7 @@ test("recent shows only this campaign's newest 20 and its DB-backed buttons open
   const recent = await send("/recent"); await deliverNotices(db, config, "local-token", clock);
   const body = outgoing.at(-1)!;
   expect(String(body.text)).toContain("25"); expect(String(body.text)).not.toContain("-2000");
+  expect(String(body.text)).toContain("принято"); expect(String(body.text)).not.toMatch(/\b(VALID|INVALID|REVIEW)\b/);
   const buttons = (body.reply_markup as { inline_keyboard: { callback_data: string }[][] }).inline_keyboard;
   expect(buttons.length).toBe(20); expect(buttons[0]![0]!.callback_data).toBe("au:r:-1001:25");
   expect(buttons.at(-1)![0]!.callback_data).toBe("au:r:-1001:6");

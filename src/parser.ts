@@ -21,7 +21,7 @@ export function parseAmount(text: string | undefined, maxAmount: number, entitie
   const numbers = [...value.matchAll(/\p{N}+/gu)];
   // A malformed numeric expression (1.5 / 1,000) is one attempted amount,
   // not two independent practice quantities. Keep its warning outside silence.
-  // Separate quantities, including whitespace-separated ones, stay quiet.
+  // Retained as diagnostic metadata; all invalid numeric inputs may warn.
   multipleNumbers = [...value.matchAll(/\p{N}+(?:[.,:/\\−–—-]\p{N}+)*/gu)].length > 1;
   if (!numbers.length) return result("NO_NUMBER");
   const invalid = () => result("INVALID_NUMERIC", "Не учтено: напишите одно целое положительное количество без знака и разделителей, например 108.");

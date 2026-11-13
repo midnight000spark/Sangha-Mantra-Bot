@@ -40,7 +40,7 @@ test("one malformed numeric expression retains a warning rather than being mista
     expect(parseAmount(text,1_000_000)).toMatchObject({kind:"INVALID_NUMERIC",amount:0,multipleNumbers:false});
 });
 
-test("multiple independent quantities stay quiet even if one has an invalid fractional format",()=>{
+test("multiple independent quantities are identified even if one has an invalid fractional format",()=>{
   for(const text of ["1000 и 2000","1.5 и 108","1000, 2000","1000 2000","2 раза по 108","1 000"])
     expect(parseAmount(text,1_000_000)).toMatchObject({amount:0,multipleNumbers:true});
 });
