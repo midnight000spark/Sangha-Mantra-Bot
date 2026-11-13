@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import worker from "../src/worker";
-import { initialize } from "../src/config";
+import { initializeTestDb as initialize } from "./db";
 import { deliverNotices, enqueueNotice, notifyOperators } from "../src/admin";
 import { inspect, totals } from "../src/core";
 import { parseTelegramUpdate, sendTelegramMessage } from "../src/telegram";
@@ -13,14 +13,15 @@ let network: ReturnType<typeof spyOn<typeof globalThis, "fetch">>;
 beforeEach(() => { network = spyOn(globalThis, "fetch").mockImplementation(fakeFetch(async () => sent())); });
 afterEach(() => network.mockRestore());
 
-async function environment(): Promise<Env> {
+async function environment(startDay = testConfig.startDay, reportChatId = testConfig.reportChatId): Promise<Env> {
   const db = await createTestDb();
   await seedIdentity(db);
+  await initialize(db,{...testConfig,startDay,reportChatId});
   return {
     DB: db, DEPLOYMENT_ENV: "test", EXPECTED_D1_ID: "11111111-1111-1111-1111-111111111111", EXPECTED_BOT_ID: "123456",
     BOT_TOKEN: "123456:test-token", WEBHOOK_SECRET: "a-long-local-secret-token",
-    ADMIN_IDS: "42", CAMPAIGN_ID: "test", TIMEZONE: "Europe/Moscow", CAMPAIGN_START: "2026-11-01",
-    REPORT_TIME: "00:05", GOAL: "1000000", MAX_AMOUNT: "1000000", ALLOWED_CHAT_IDS: "-1001,-1002", REPORT_CHAT_ID: "-1001",
+    ADMIN_IDS: "42", CAMPAIGN_ID: "test", TIMEZONE: "Europe/Moscow", CAMPAIGN_START: startDay,
+    REPORT_TIME: "00:05", GOAL: "1000000", MAX_AMOUNT: "1000000", ALLOWED_CHAT_IDS: "-1001,-1002", REPORT_CHAT_ID: String(reportChatId),
   };
 }
 const date = Math.floor(Date.parse("2026-11-03T10:00:00Z") / 1000);
@@ -117,7 +118,7 @@ describe("durable webhook", () => {
 
   test("rejected numbers receive one durable explanation; duplicates do not resend it", async () => {
     const env = await environment();
-    const invalid = payload("1,000");
+    const invalid = payload("-100");
     expect((await invoke(env, invalid)).status).toBe(200);
     expect((await invoke(env, invalid)).status).toBe(200);
     expect((await totals(env.DB, "test")).total).toBe("0");
@@ -144,11 +145,14 @@ describe("durable webhook", () => {
     expect((await totals(env.DB, "test")).total).toBe("108");
   });
 
-  test("migration retains original chat identity and maps future messages", async () => {
+  test("migration retains source identity; a new source alias requires its own verified intake boundary", async () => {
     const env = await environment();
     await invoke(env, payload("108", 1));
     await invoke(env, payload("", 2, 2, { migrate_to_chat_id: -2001 }));
-    await invoke(env, payload("108", 1, 3, { chat: { id: -2001, type: "supergroup" } }));
+    const next=payload("108", 1, 3, { chat: { id: -2001, type: "supergroup" } });
+    expect((await invoke(env,next)).status).toBe(503);
+    await env.DB.prepare("INSERT INTO automatic_intake_boundaries VALUES('test',-2001,1,NULL,'Verified migrated test source',42,1)").run();
+    expect((await invoke(env,next)).status).toBe(200);
     expect((await totals(env.DB, "test")).total).toBe("216");
     expect(await env.DB.prepare("SELECT report_chat_id FROM campaigns WHERE id='test'").first("report_chat_id")).toBe(-2001);
     expect((await inspect(env.DB, -1001, 1))?.effective_amount).toBe(108);
@@ -170,8 +174,7 @@ describe("durable webhook", () => {
   });
 
   test("migration of a separate report chat never enables accumulation there", async () => {
-    const env = await environment();
-    env.REPORT_CHAT_ID = "-3001";
+    const env = await environment(testConfig.startDay,-3001);
     await env.DB.prepare("UPDATE deployment_identity SET report_chat_id=-3001").run();
     await invoke(env, payload("", 1, 1, { chat: { id: -3001, type: "group" }, migrate_to_chat_id: -4001 }));
     expect(await env.DB.prepare("SELECT report_chat_id FROM campaigns WHERE id='test'").first("report_chat_id")).toBe(-4001);
@@ -184,6 +187,7 @@ describe("durable webhook", () => {
     const env = await environment();
     await invoke(env, payload("108", 1));
     await invoke(env, payload("", 2, 2, { migrate_to_chat_id: -2001 }));
+    await env.DB.prepare("INSERT INTO automatic_intake_boundaries VALUES('test',-2001,1,NULL,'Verified migrated test source',42,1)").run();
     await invoke(env, { update_id: 3, my_chat_member: { chat: { id: -1001, type: "group" }, date, new_chat_member: { status: "kicked" } } });
     const response = await worker.fetch(new Request("https://example.invalid/health", { headers: { "X-Telegram-Bot-Api-Secret-Token": env.WEBHOOK_SECRET } }), env, {} as ExecutionContext);
     const health = await response.json() as { status: string; missingAccess: unknown[] };
@@ -276,8 +280,7 @@ describe("notification uncertainty", () => {
   });
 
   test("seven-day cron catchup with alerts and backlog stays below Free subrequest limit", async () => {
-    const env = await environment();
-    env.CAMPAIGN_START = "2020-01-01";
+    const env = await environment("2020-01-01");
     const config = { ...testConfig, startDay: env.CAMPAIGN_START };
     await initialize(env.DB, config);
     for (let i = 0; i < 5; i++) await enqueueNotice(env.DB, config, `backlog-${i}`, 42, "test", i + 1);
@@ -368,7 +371,7 @@ describe("free conversation MVP regressions", () => {
 
   test("fresh update IDs for the same invalid message cannot create a notice flood", async () => {
     const env = await environment();
-    for (let i=1;i<=20;i++) await invoke(env,payload("1000 и 2000",1,i));
+    for (let i=1;i<=20;i++) await invoke(env,payload("-100",1,i));
     expect((await totals(env.DB,"test")).total).toBe("0");
     expect(await env.DB.prepare("SELECT COUNT(*) n FROM notices").first("n")).toBe(1);
     expect(network).toHaveBeenCalledTimes(1);
@@ -395,7 +398,7 @@ describe("TEST resource isolation fails closed", () => {
       const env = {...await environment(),...change};
       expect((await invoke(env,payload("108"))).status).toBe(503);
       expect(await env.DB.prepare("SELECT COUNT(*) n FROM contributions").first("n")).toBe(0);
-      expect(await env.DB.prepare("SELECT COUNT(*) n FROM campaigns").first("n")).toBe(0);
+      expect(await env.DB.prepare("SELECT COUNT(*) n FROM campaigns").first("n")).toBe(1);
     }
     const env = await environment(); env.DB = await createTestDb();
     expect((await invoke(env,payload("108"))).status).toBe(503);
@@ -406,7 +409,7 @@ describe("TEST resource isolation fails closed", () => {
     const env = await environment();
     const second = {...env,WEBHOOK_SECRET:"separate-other-environment-secret",DEPLOYMENT_ENV:"production"};
     expect((await invoke(second,payload("108"),env.WEBHOOK_SECRET)).status).toBe(401);
-    expect(await env.DB.prepare("SELECT COUNT(*) n FROM campaigns").first("n")).toBe(0);
+    expect(await env.DB.prepare("SELECT COUNT(*) n FROM campaigns").first("n")).toBe(1);
   });
 
   test("reloaded Worker using the same D1 does not duplicate a committed contribution", async () => {
@@ -420,4 +423,87 @@ describe("TEST resource isolation fails closed", () => {
     expect((await totals(env.DB,"test")).total).toBe("1000");
     expect(await env.DB.prepare("SELECT COUNT(*) n FROM event_log").first("n")).toBe(1);
   });
+});
+
+
+test("opt-in TEST diagnostics persist structural evidence for ignored group contexts without their contents", async()=>{
+  const env=await environment();env.TEST_INPUT_DIAGNOSTICS="true";
+  await invoke(env,payload("108",501,501,{sender_chat:{id:-2001,title:"private sender"}}));
+  const row=await env.DB.prepare("SELECT detail FROM operational_events WHERE kind='TEST_INPUT_DIAGNOSTIC'").first<{detail:string}>();
+  const detail=JSON.parse(row!.detail);
+  expect(detail.chatId).toBe(-1001);expect(detail.hasSenderChat).toBe(true);expect(detail.numericKind).toBe("ONE_VALID");
+  expect(detail.parserAccepted).toBe(true);expect(row!.detail).not.toContain("private sender");
+  expect((await totals(env.DB,"test")).total).toBe("0");
+});
+
+test("invalid numeric inputs warn once outside silence; silence backlog stays held",async()=>{
+  const env=await environment();
+  const {setSilence}=await import("../src/controls");
+  const invalid=payload("1.5",601);
+  expect((await invoke(env,invalid)).status).toBe(200);await invoke(env,invalid);
+  expect(network).toHaveBeenCalledTimes(1);
+  await invoke(env,payload("1000 и 2000",602));expect(network).toHaveBeenCalledTimes(2);
+  const now=Date.now();await setSilence(env.DB,testConfig,true,42,"fraction-silent-on",now);
+  await invoke(env,payload("2.5",603));expect(network).toHaveBeenCalledTimes(2);
+  await setSilence(env.DB,testConfig,false,42,"fraction-silent-off",now+1);
+  await deliverNotices(env.DB,testConfig,env.BOT_TOKEN);expect(network).toHaveBeenCalledTimes(2);
+  await invoke(env,payload("3.5",604,604,{date:Math.ceil(Date.now()/1000)+1}));
+  expect(network).toHaveBeenCalledTimes(3);
+  expect(await env.DB.prepare("SELECT state,publication_hold FROM notices WHERE reply_message_id=603").first())
+    .toEqual({state:"PENDING",publication_hold:1});
+  expect((await totals(env.DB,"test")).total).toBe("0");
+});
+
+test("TEST bot intake and private administration require exact sender/chat and verified D1 identity", async () => {
+  const env=await environment();
+  env.TEST_SENDER_BOT_ID="101"; env.TEST_SENDER_CHAT_ID="-1001"; env.ADMIN_IDS="42,101";
+  await invoke(env,payload("108",701,701,{from:{id:101,is_bot:true}}));
+  expect((await totals(env.DB,"test")).total).toBe("108");
+  for(const extra of [{from:{id:102,is_bot:true}}, {from:{id:101,is_bot:true},chat:{id:-1002,type:"supergroup"}},
+    {from:{id:101,is_bot:true},sender_chat:{id:-1001}}, {from:{id:101,is_bot:true},forward_origin:{type:"user"}}]) {
+    await invoke(env,payload("108",702,702,extra));
+  }
+  expect((await totals(env.DB,"test")).total).toBe("108");
+  const dm=payload("/silent on",710,710,{date:Math.floor(Date.now()/1000),from:{id:101,is_bot:true},chat:{id:101,type:"private"}});
+  await invoke(env,dm);
+  expect(await env.DB.prepare("SELECT silent FROM campaign_controls").first("silent")).toBe(1);
+  await env.DB.prepare("UPDATE deployment_identity SET bot_id=654321").run();
+  expect((await invoke(env,payload("1000",711,711,{from:{id:101,is_bot:true}}))).status).toBe(503);
+  expect((await totals(env.DB,"test")).total).toBe("108");
+});
+
+test("TEST sender configuration fails closed for production, partial IDs, self and foreign chat", async()=>{
+  const {getConfig}=await import("../src/config");
+  const env=await environment();
+  for(const patch of [
+    {TEST_SENDER_BOT_ID:"101"}, {TEST_SENDER_CHAT_ID:"-1001"},
+    {TEST_SENDER_BOT_ID:"123456",TEST_SENDER_CHAT_ID:"-1001"},
+    {TEST_SENDER_BOT_ID:"101",TEST_SENDER_CHAT_ID:"-999"},
+    {TEST_SENDER_BOT_ID:"101,102",TEST_SENDER_CHAT_ID:"-1001"},
+    {DEPLOYMENT_ENV:"production",CAMPAIGN_ID:"sangha-production",ALLOWED_CHAT_IDS:"-1001234567891",REPORT_CHAT_ID:"-1001234567891",TEST_SENDER_BOT_ID:"101",TEST_SENDER_CHAT_ID:"-1001234567891"},
+  ]) expect(()=>getConfig({...env,...patch})).toThrow();
+});
+
+test("required numeric matrix, media and edits preserve one notice per source in both silence states",async()=>{
+  for(const silent of [false,true]) {
+    const env=await environment();
+    if(silent) {const {setSilence}=await import("../src/controls");await setSilence(env.DB,testConfig,true,42,"matrix-on",Date.now());}
+    const initialCalls=network.mock.calls.length;
+    const texts=["1000","1000🙏","10 и 10","1000 2000","1.5","0","Привет"];
+    for(const [i,text] of texts.entries()) {
+      const input=payload(text,800+i);await invoke(env,input);await invoke(env,input);
+    }
+    await invoke(env,payload("",810,810,{photo:[{file_id:"test"}],caption:"500"}));
+    await invoke(env,payload("",811,811,{video:{file_id:"test"},caption:"500"}));
+    expect((await totals(env.DB,"test")).total).toBe("2000");
+    expect(network.mock.calls.length-initialCalls).toBe(silent ? 0:4);
+    const base=payload("10 и 10",802).message;
+    for(const [i,text] of ["12 и 13","108","1.5","108"].entries()) {
+      const update={update_id:900+i,edited_message:{...base,text,edit_date:date+i+1}};
+      await invoke(env,update);await invoke(env,update);
+    }
+    expect((await totals(env.DB,"test")).total).toBe("2108");
+    expect(await env.DB.prepare("SELECT COUNT(*) n FROM notices WHERE reply_message_id=802").first("n")).toBe(1);
+    expect(network.mock.calls.length-initialCalls).toBe(silent ? 0:4);
+  }
 });

@@ -21,3 +21,6 @@ sangha-mantra-bot.zip
 *.pem
 *.key
 .envrc
+
+__pycache__/
+*.pyc

@@ -14,6 +14,7 @@
 - `scripts/production-ops.ts` — ожидаемые аккаунт, бот, D1, чат и origin;
 - `scripts/connect-production.ts` — те же идентификаторы, username бота, старый/новый webhook;
 - `scripts/production-tail.ts` — версия Worker для ограниченного сбора метрик;
+- `scripts/maintenance-test-setup.ts`, `maintenance-test-probes.ts`, `maintenance-warning-probe.ts` — отдельные TEST-targets и их дополнительные guards;
 - соответствующие тесты конфигурации и операционных защит.
 
 Сохраняйте проверки совпадения, не отключайте их ради прохождения установки. Опубликованные тесты подтверждают согласованность примеров, а не пригодность вашей cloud-конфигурации.
@@ -25,6 +26,8 @@
 `scripts/prepare-test.sh` и `prepare-test.ts` помогают подготовить отдельного нового TEST-бота. Скрипт отказывается забирать бота с существующим webhook. Прочитайте код перед запуском: он обращается к Telegram и создаёт частные файлы в `.secrets/`. Для live-инструментов требуется собственный проверенный deployment receipt `.secrets/test-deployment.json`; он не включён в публикацию и не создаётся локальными тестами автоматически.
 
 После создания собственной D1 примените миграции в выбранной среде. До запуска Worker отдельно зарегистрируйте идентичность: для TEST таблица `deployment_identity`, для production — `production_deployment_identity`. Значения должны точно совпадать с конфигурацией: environment, database_id, campaign_id, bot_id, source_chat_ids и report_chat_id. `scripts/test-target.ts --sql` генерирует только TEST enrollment; для локальной среды добавьте `--local`.
+
+До приёма новых чисел отдельно provision проверенную границу `automatic_intake_boundaries` для каждого source chat. Без неё webhook для нового числового сообщения возвращает 503, отчёты приостановлены. Не угадывайте начало учёта действующей кампании; см. [maintenance](MAINTENANCE.md). Локальный `--local --sql` также создаёт синтетическую кампанию/alias и границу; remote `--sql` ограничен identity enrollment.
 
 Не копируйте таблицу идентичности или данные TEST в production. Кампания после инициализации фиксирует timezone, start_day и goal; изменение требует отдельно проверенной миграции.
 

@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
 import { Miniflare, Response as RuntimeResponse } from "miniflare";
 import { Glob } from "bun";
-import { initialize } from "../src/config";
+import { initializeTestDb as initialize } from "./db";
 import { ingest, totals } from "../src/core";
 import { seedIdentity, testConfig as config } from "./db";
 import type { ContributionEvent } from "../src/types";

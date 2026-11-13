@@ -1,3 +1,6 @@
+import { isTestSender } from "./test-sender";
+import { telegramEnvelopeSummary } from "./diagnostics";
+import { silenceState } from "./controls";
 import { getConfig, initialize } from "./config";
 import { ingest, totals } from "./core";
 import { deliverNotices, enqueueNotice, handleAdmin, notifyOperators } from "./admin";
@@ -23,7 +26,7 @@ export default {
       const config = getConfig(env);
       await initialize(env.DB, config);
       if (path === "/health") {
-        const [summary, recovery, reports, notices, heartbeat, reviews, membership] = await Promise.all([
+        const [summary, recovery, reports, notices, heartbeat, reviews, membership, silence, missingBoundaries] = await Promise.all([
           totals(env.DB, config.campaignId),
           env.DB.prepare("SELECT restored_at,backup_at FROM recovery_state WHERE campaign_id=? AND reconciled_at IS NULL").bind(config.campaignId).first(),
           env.DB.prepare("SELECT COUNT(*) AS count FROM daily_reports WHERE campaign_id=? AND status IN ('UNCERTAIN','FAILED_KNOWN')").bind(config.campaignId).first<{ count: number }>(),
@@ -34,11 +37,15 @@ export default {
             AND NOT EXISTS(SELECT 1 FROM operational_events e WHERE e.campaign_id=m.campaign_id
               AND e.kind='CHAT_MIGRATION' AND json_extract(e.detail,'$.oldId')=m.chat_id)`)
             .bind(config.campaignId).all<{chat_id:number;status:string;can_send_messages:number|null}>(),
+          silenceState(env.DB, config.campaignId),
+          env.DB.prepare(`SELECT a.chat_id FROM chat_aliases a WHERE a.campaign_id=?
+            AND NOT EXISTS(SELECT 1 FROM automatic_intake_boundaries b WHERE b.campaign_id=a.campaign_id AND b.chat_id=a.chat_id)`)
+            .bind(config.campaignId).all<{chat_id:number}>(),
         ]);
         const missingAccess = membership.results.filter(row => ["left", "kicked"].includes(row.status) || row.can_send_messages === 0);
         return Response.json({
-          status: recovery || reports?.count || notices?.count || reviews?.count || missingAccess.length ? "degraded" : "ok",
-          campaign: config.campaignId, total: summary, unresolvedReports: reports?.count ?? 0,
+          status: recovery || reports?.count || notices?.count || reviews?.count || missingAccess.length || missingBoundaries.results.length ? "degraded" : "ok",
+          campaign: config.campaignId, total: summary, silent: Boolean(silence.silent), missingIntakeBoundaries: missingBoundaries.results, unresolvedReports: reports?.count ?? 0,
           unresolvedNotices: notices?.count ?? 0, reviews: reviews?.count ?? 0,
           recoveryPending: recovery !== null, recovery, missingAccess,
           lastCronAt: heartbeat?.last_cron_at ?? null, lastEventAt: heartbeat?.last_webhook_at ?? null,
@@ -67,10 +74,27 @@ export default {
       try { raw = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); }
       catch { return new Response("Invalid JSON", { status: 400 }); }
       const update = parseTelegramUpdate(raw);
+      if (config.deployment?.environment === "test" && env.TEST_INPUT_DIAGNOSTICS === "true") {
+        const input = update?.message ?? update?.edited_message;
+        const numeric = input ? parseAmount(input.text, config.maxAmount, input.entities) : null;
+        const detail = { ...telegramEnvelopeSummary(raw), parserAccepted: update !== null,
+          service: input?.service ?? null, numericKind: numeric?.kind ?? null, multipleNumbers: numeric?.multipleNumbers ?? false };
+        await env.DB.prepare(`INSERT INTO operational_events(event_key,campaign_id,kind,source_chat_id,message_id,detail,created_at)
+          VALUES(?,?,'TEST_INPUT_DIAGNOSTIC',?,?,?,?) ON CONFLICT(event_key) DO NOTHING`)
+          .bind(`test-input:${await eventKey(raw)}`, config.campaignId, detail.chatId, detail.messageId, JSON.stringify(detail), Date.now()).run();
+      }
       if (!update) return new Response("Invalid Telegram update", { status: 400 });
       const key = await eventKey(update);
       const now = Date.now();
       const message = update.message ?? update.edited_message;
+      // TEST-only receipt of the allowlisted bot's real Telegram envelope. No human payloads.
+      if (message && message.sender_chat === undefined && message.forward_origin === undefined
+        && message.forward_date === undefined && !message.is_automatic_forward
+        && (isTestSender(config, message) || isTestSender(config, message, true))) {
+        await env.DB.prepare(`INSERT INTO operational_events(event_key,campaign_id,update_id,kind,source_chat_id,message_id,detail,created_at)
+          VALUES(?,?,?,'TEST_BOT_INPUT',?,?,?,?) ON CONFLICT(event_key) DO NOTHING`)
+          .bind(`test-bot:${key}`, config.campaignId, update.update_id, message.chat.id, message.message_id, JSON.stringify(update), now).run();
+      }
       let noticesQueued = false;
       let handled = false;
       if (update.callback_query) {
@@ -128,7 +152,7 @@ export default {
       }
       if (!handled && message && ["group", "supergroup"].includes(message.chat.type)) {
         const alias = await env.DB.prepare("SELECT chat_id FROM chat_aliases WHERE chat_id=? AND campaign_id=?").bind(message.chat.id, config.campaignId).first();
-        if (alias && !message.service && message.from && !message.from.is_bot && message.sender_chat === undefined
+        if (alias && !message.service && message.from && (!message.from.is_bot || isTestSender(config, message)) && message.sender_chat === undefined
           && message.forward_origin === undefined && message.forward_date === undefined && !message.is_automatic_forward) {
           const parsed = parseAmount(message.text, config.maxAmount, message.entities);
           // New conversation/media has no ledger row. Edits need a zero tombstone even
@@ -144,8 +168,8 @@ export default {
               const reason = result.outcome === "NEEDS_REVIEW"
                 ? "Версии сообщения неоднозначны. Вклад требует проверки ответственным за учёт."
                 : parsed.reason ?? result.reason ?? "Вклад не принят. Обратитесь к ответственному за учёт.";
-              if (parsed.kind !== "NO_NUMBER") {
-                await enqueueNotice(env.DB, config, `rejected:${message.chat.id}:${message.message_id}`, message.chat.id, reason, now, message.message_id);
+              if (parsed.kind !== "NO_NUMBER" && result.outcome !== "REJECTED") {
+                await enqueueNotice(env.DB, config, `rejected:${message.chat.id}:${message.message_id}`, message.chat.id, reason, now, message.message_id, (message.edit_date ?? message.date) * 1000);
                 noticesQueued = true;
               }
               if (result.outcome === "NEEDS_REVIEW") await notifyOperators(env.DB, config, now);

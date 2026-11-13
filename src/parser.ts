@@ -3,8 +3,9 @@ export type NumericKind = "NO_NUMBER" | "ONE_VALID" | "AMBIGUOUS" | "INVALID_NUM
 
 /** Deterministic grammar, no digit stripping or locale guesses. Offsets are UTF-16, as in Telegram. */
 export function parseAmount(text: string | undefined, maxAmount: number, entities: TextEntity[] = []) {
+  let multipleNumbers = false;
   const result = (kind: NumericKind, reason: string | null = null, amount = 0) => ({
-    kind, amount, state: kind === "ONE_VALID" ? "VALID" as const : "INVALID" as const, reason,
+    kind, amount, multipleNumbers, state: kind === "ONE_VALID" ? "VALID" as const : "INVALID" as const, reason,
   });
   if (!text || /^\s*\//u.test(text)) return result("NO_NUMBER");
   const excluded = new Set(["url", "text_link", "code", "pre", "mention", "text_mention", "email", "bot_command"]);
@@ -18,6 +19,10 @@ export function parseAmount(text: string | undefined, maxAmount: number, entitie
     .replace(/(?:[\p{L}][\p{L}\d+.-]*:\/\/|www\.)[^\s<>]+|[\p{L}\p{N}_.+-]+@[\p{L}\p{N}_.-]+|@[\p{L}\p{N}_]+|(?:[\p{L}\p{N}-]+\.)+[\p{L}]{2,}(?:\/[^\s<>]*)?/gu,
       match => "\uFFFD".repeat(match.length));
   const numbers = [...value.matchAll(/\p{N}+/gu)];
+  // A malformed numeric expression (1.5 / 1,000) is one attempted amount,
+  // not two independent practice quantities. Keep its warning outside silence.
+  // Retained as diagnostic metadata; all invalid numeric inputs may warn.
+  multipleNumbers = [...value.matchAll(/\p{N}+(?:[.,:/\\−–—-]\p{N}+)*/gu)].length > 1;
   if (!numbers.length) return result("NO_NUMBER");
   const invalid = () => result("INVALID_NUMERIC", "Не учтено: напишите одно целое положительное количество без знака и разделителей, например 108.");
   // Decimals, dates, telephone and grouped thousands are unsupported as a whole.

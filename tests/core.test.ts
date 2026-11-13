@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { adjust, importContribution, ingest, inspect, totals } from "../src/core";
-import { initialize } from "../src/config";
+import { initializeTestDb as initialize } from "./db";
 import { parseAmount } from "../src/parser";
 import type { ContributionEvent } from "../src/types";
 import { createTestDb, testConfig as config } from "./db";

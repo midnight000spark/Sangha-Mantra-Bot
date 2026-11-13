@@ -1,3 +1,5 @@
+import { stateText } from "./admin-text";
+import { isTestSender } from "./test-sender";
 import { adjustmentStatements, inspect } from "./core";
 import { resolveTelegramGroup, type ReplyMarkup, type TelegramCallback, type TelegramMessage } from "./telegram";
 import type { Config, Contribution } from "./types";
@@ -83,7 +85,7 @@ async function openRecord(ctx: Context, chatId: number, messageId: number): Prom
     await commit(ctx, "NOT_FOUND", "Накопление не найдено в этой кампании. Проверьте ссылку или выберите запись через /recent."); return;
   }
   const id = crypto.randomUUID().replaceAll("-", "");
-  await commit(ctx, "OPEN", `Накопление за ${row.local_day}\nСообщение: ${chatId}/${messageId}\nТекущее значение: ${row.effective_amount}\nЗначение участника: ${row.source_amount} (${row.source_state})\nАдминистративное значение: ${row.override_amount ?? "не задано"}\nДиалог действует 30 минут.`, {
+  await commit(ctx, "OPEN", `Накопление за ${row.local_day}\nСообщение: ${chatId}/${messageId}\nТекущее значение: ${row.effective_amount}\nЗначение участника: ${row.source_amount} (${stateText(row.source_state)})\nАдминистративное значение: ${row.override_amount ?? "не задано"}\nДиалог действует 30 минут.`, {
     session: id, guard: revisionGuard(row), detail: { chatId, messageId, current: row.effective_amount },
     markup: { inline_keyboard: [[{ text: "Исправить", callback_data: `au:e:${id}` }, { text: "Отменить", callback_data: `au:c:${id}` }]] },
     mutations: gate => [
@@ -155,7 +157,7 @@ export async function handleAdminDialog(db: D1Database, config: Config, input: {
   const from = message?.from ?? callback?.from;
   const chat = message?.chat ?? callback?.message?.chat;
   if ((!chat || chat.type !== "private") && !callback) return false;
-  const authorized = chat?.type === "private" && from && !from.is_bot && config.adminIds.includes(from.id) && chat.id === from.id
+  const authorized = chat?.type === "private" && from && (!from.is_bot || (message && isTestSender(config, message, true))) && config.adminIds.includes(from.id) && chat.id === from.id
     && !message?.service && message?.sender_chat === undefined && message?.forward_origin === undefined
     && message?.forward_date === undefined && !message?.is_automatic_forward;
   if (!authorized) {
@@ -201,12 +203,12 @@ export async function handleAdminDialog(db: D1Database, config: Config, input: {
       WHERE campaign_id=? ORDER BY original_date DESC,source_chat_id,message_id DESC LIMIT 20`).bind(config.campaignId)
       .all<Pick<Contribution, "source_chat_id" | "message_id" | "local_day" | "effective_amount" | "source_state">>();
     await commit(ctx, "RECENT", rows.results.length ? "Последние накопления (по дате исходного сообщения):\n" + rows.results.map((r, i) =>
-      `${i + 1}. ${r.local_day}: ${r.effective_amount} (${r.source_state}) · ${r.source_chat_id}/${r.message_id}`).join("\n") : "Накоплений пока нет.", {
+      `${i + 1}. ${r.local_day}: ${r.effective_amount} (${stateText(r.source_state)}) · ${r.source_chat_id}/${r.message_id}`).join("\n") : "Накоплений пока нет.", {
       markup: rows.results.length ? { inline_keyboard: rows.results.map((r, i) => [{ text: `${i + 1}. ${r.effective_amount} · ${r.local_day}`,
         callback_data: `au:r:${r.source_chat_id}:${r.message_id}` }]) } : undefined,
     }); return true;
   }
-  if (text.startsWith("/") && !message!.reply_to_message_id) return false;
+  if (text.startsWith("/")) return false;
   const link = parseMessageLink(text);
   if (link) {
     const chatId = link.chatId ?? await resolveTelegramGroup(token, link.username!);

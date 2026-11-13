@@ -8,4 +8,4 @@ read -r -s -p 'TEST bot token (hidden): ' BOT_TOKEN
 printf '\n'
 export TEST_BOT_USERNAME BOT_TOKEN
 trap 'unset BOT_TOKEN' EXIT
-bun scripts/prepare-test.ts
+bun scripts/prepare-test.ts "$@"

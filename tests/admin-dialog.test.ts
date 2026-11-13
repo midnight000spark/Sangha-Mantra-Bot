@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { handleAdminDialog, parseMessageLink } from "../src/admin-dialog";
-import { initialize } from "../src/config";
+import { initializeTestDb as initialize } from "./db";
 import { adjust, ingest, inspect, totals } from "../src/core";
 import { deliverNotices } from "../src/admin";
 import { parseTelegramUpdate, type TelegramCallback, type TelegramMessage } from "../src/telegram";
@@ -173,12 +173,14 @@ test("correction failure rolls back receipt/session/outbox/audit, then retry saf
 test("recent shows only this campaign's newest 20 and its DB-backed buttons open a record", async () => {
   await db.prepare("INSERT INTO campaigns VALUES('other','UTC','2026-11-01',1000,-2000,NULL)").run();
   await db.prepare("INSERT INTO chat_aliases VALUES(-2000,'other')").run();
+  await db.prepare("INSERT INTO automatic_intake_boundaries VALUES('other',-2000,1,NULL,'Synthetic fixture',42,1)").run();
   await ingest(db, { ...config, campaignId: "other" }, { key: "other", updateId: 999, chatId: -2000, messageId: 999,
     userId: 8, originalDate: date + 1000, versionDate: date + 1000, isEdit: false, amount: 999, state: "VALID", reason: null, now: clock });
   for (let n = 2; n <= 25; n++) await source(n, n);
   const recent = await send("/recent"); await deliverNotices(db, config, "local-token", clock);
   const body = outgoing.at(-1)!;
   expect(String(body.text)).toContain("25"); expect(String(body.text)).not.toContain("-2000");
+  expect(String(body.text)).toContain("принято"); expect(String(body.text)).not.toMatch(/\b(VALID|INVALID|REVIEW)\b/);
   const buttons = (body.reply_markup as { inline_keyboard: { callback_data: string }[][] }).inline_keyboard;
   expect(buttons.length).toBe(20); expect(buttons[0]![0]!.callback_data).toBe("au:r:-1001:25");
   expect(buttons.at(-1)![0]!.callback_data).toBe("au:r:-1001:6");

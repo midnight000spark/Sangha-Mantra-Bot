@@ -26,9 +26,19 @@ export function getConfig(env: Env): Config {
   if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(env.REPORT_TIME)) throw new Error("Invalid report time");
   validateTimezone(env.TIMEZONE);
   if (!env.BOT_TOKEN || !/^[A-Za-z0-9_-]{16,256}$/.test(env.WEBHOOK_SECRET)) throw new Error("Missing token or invalid webhook secret");
+  let testSender: Config["testSender"];
+  if (env.TEST_SENDER_BOT_ID !== undefined || env.TEST_SENDER_CHAT_ID !== undefined) {
+    if (env.DEPLOYMENT_ENV !== "test") throw new Error("TEST sender forbidden in production");
+    const bot = ids(env.TEST_SENDER_BOT_ID ?? "", true);
+    const chat = ids(env.TEST_SENDER_CHAT_ID ?? "", false);
+    if (bot.length !== 1 || chat.length !== 1 || bot[0] === Number(env.EXPECTED_BOT_ID)
+      || !ids(env.ALLOWED_CHAT_IDS, false).includes(chat[0]!)) throw new Error("Invalid TEST sender isolation");
+    testSender = { botId: bot[0]!, chatId: chat[0]! };
+  }
   const reportChatIds = ids(env.REPORT_CHAT_ID, false);
   if (reportChatIds.length !== 1) throw new Error("Configure exactly one report chat");
   return {
+    testSender,
     deployment: { environment: env.DEPLOYMENT_ENV, databaseId: env.EXPECTED_D1_ID, botId: Number(env.EXPECTED_BOT_ID),
       sourceChatIds: ids(env.ALLOWED_CHAT_IDS, false).sort((a,b) => a-b).join(","), reportChatId: reportChatIds[0]! },
     campaignId: env.CAMPAIGN_ID, timezone: env.TIMEZONE, startDay: env.CAMPAIGN_START,
