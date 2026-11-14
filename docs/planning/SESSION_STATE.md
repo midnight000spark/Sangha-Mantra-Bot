@@ -1,3 +1,5 @@
+> A05 checkpoint 2026-11-14: исторический текст ниже сохранён как planning baseline. Runtime a59c6be включает A01–A04; их независимые APPROVE унаследованы из задания владельца. A05 локальные проверки выполнены, общий статус PARTIAL до provider TEST PITR point/undo/schema receipt. Текущие доказательства и ограничения — [A05 review](../A05_LOCAL_REVIEW_2026-11-14.md), [transition runbook](../A05_TRANSITION_RUNBOOK.md); exact review candidate/patch hashes — test-results/a05/manifest.json. Production readiness и разрешение deployment не выдаются.
+
 # Состояние документационной сессии
 
 Дата: 14.11.2026. Статус: **четыре решения владельца EV09 внесены во все связанные спецификации и зависимости; docs-only ревизия завершена**. Изменены только восемь Markdown под docs/planning/. Код, migrations/tests/config/secrets, Git commits/push/merge и production не изменялись.
