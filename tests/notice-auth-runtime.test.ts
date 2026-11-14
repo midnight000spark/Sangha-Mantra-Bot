@@ -4,6 +4,7 @@ import { Miniflare, Response as RuntimeResponse } from "miniflare";
 import { enqueueNotice } from "../src/admin";
 import { initializeTestDb, seedIdentity, testConfig } from "./db";
 import { noticeAuthorizationCases } from "./notice-auth-cases";
+import { ingest } from "../src/core";
 
 async function migrate(db: D1Database) {
   for (const file of Array.from(new Glob("*.sql").scanSync("migrations")).sort()) {
@@ -64,7 +65,10 @@ test("compiled Worker: new env denies all admin namespaces; old env still requir
       await enqueueNotice(db, testConfig, `${prefix}old-config`, 42, "private administrative fixture", now);
     }
     await enqueueNotice(db, testConfig, "participant:regular", 77, "participant fixture", now);
-    await enqueueNotice(db, testConfig, "rejected:regular", -1001, "group fixture", now);
+    await ingest(db, testConfig, { key: "auth-group-source", updateId: 1, chatId: -1001, messageId: 7, userId: 77,
+      originalDate: Math.floor(now / 1000), versionDate: Math.floor(now / 1000), isEdit: false,
+      amount: 0, state: "INVALID", reason: "fixture", now });
+    await enqueueNotice(db, testConfig, "rejected:regular", -1001, "group fixture", now, 7, now, "auth-group-source");
     await enqueueNotice(db, testConfig, "admin:retained", 43, "current admin fixture", now);
     for (let i = 0; i < 4; i++) await cron("new");
     expect(sends.map(s => s.chat_id).sort((a, b) => a - b)).toEqual([-1001, 43, 77]);

@@ -169,7 +169,8 @@ export default {
                 ? "Версии сообщения неоднозначны. Вклад требует проверки ответственным за учёт."
                 : parsed.reason ?? result.reason ?? "Вклад не принят. Обратитесь к ответственному за учёт.";
               if (parsed.kind !== "NO_NUMBER" && result.outcome !== "REJECTED") {
-                await enqueueNotice(env.DB, config, `rejected:${message.chat.id}:${message.message_id}`, message.chat.id, reason, now, message.message_id, (message.edit_date ?? message.date) * 1000);
+                await enqueueNotice(env.DB, config, `rejected:${message.chat.id}:${message.message_id}:${key}`, message.chat.id, reason, now,
+                  message.message_id, (message.edit_date ?? message.date) * 1000, key);
                 noticesQueued = true;
               }
               if (result.outcome === "NEEDS_REVIEW") await notifyOperators(env.DB, config, now);

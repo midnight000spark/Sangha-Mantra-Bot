@@ -144,6 +144,8 @@ test("additive migration preserves legacy silence and fences commands using the 
     .bind(config.campaignId, (date + 2) * 1000 + 500).run();
   const before = await state();
   await db.exec(await Bun.file("migrations/0008_silent_command_order.sql").text());
+  // Current handleAdmin/enqueueNotice also requires the additive A03 outbox column.
+  await db.exec(await Bun.file("migrations/0009_notice_source_revision.sql").text());
   expect(await state()).toEqual(before);
   expect((await orders())[0]).toMatchObject({ actor_id: 0, source_chat_id: 0, command_at: (date + 2) * 1000, silent: 1 });
   for (const sent of [date + 1, date + 2]) await command(false, sent, 999);

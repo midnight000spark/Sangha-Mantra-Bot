@@ -6,11 +6,30 @@ import { adjust, DomainError, importContribution, inspect, totals } from "./core
 import { resolveReport } from "./reports";
 import { sendTelegramMessage, type ReplyMarkup, type TelegramMessage } from "./telegram";
 
-export async function enqueueNotice(db: D1Database, config: Config, key: string, chatId: number, body: string, now: number, replyId?: number, eventAt = now): Promise<void> {
-  await db.prepare(`INSERT INTO notices(notice_key,campaign_id,chat_id,reply_message_id,body,created_at,publication_hold)
-    VALUES(?,?,?,?,?,?,CASE WHEN ?<0 AND EXISTS(SELECT 1 FROM campaign_controls WHERE campaign_id=? AND (silent=1 OR notices_not_before>=?)) THEN 1 ELSE 0 END) ON CONFLICT(notice_key) DO NOTHING`)
-    .bind(key, config.campaignId, chatId, replyId ?? null, body.slice(0, 4000), now, chatId, config.campaignId, eventAt).run();
+export async function enqueueNotice(db: D1Database, config: Config, key: string, chatId: number, body: string, now: number, replyId?: number, eventAt = now, sourceEventKey?: string): Promise<void> {
+  // Revision-specific intents may replace unsent obsolete warnings. Keep the existing
+  // once-per-message behavior once a warning has actually been confirmed SENT.
+  await db.prepare(`INSERT INTO notices(notice_key,campaign_id,chat_id,reply_message_id,body,created_at,publication_hold,source_event_key)
+    SELECT ?,?,?,?,?,?,CASE WHEN ?<0 AND EXISTS(SELECT 1 FROM campaign_controls WHERE campaign_id=? AND (silent=1 OR notices_not_before>=?)) THEN 1 ELSE 0 END,?
+    WHERE ? IS NULL OR NOT EXISTS(SELECT 1 FROM notices n WHERE n.campaign_id=? AND n.chat_id=?
+      AND n.reply_message_id=? AND n.notice_key LIKE 'rejected:%' AND n.state='SENT')
+    ON CONFLICT(notice_key) DO NOTHING`)
+    .bind(key, config.campaignId, chatId, replyId ?? null, body.slice(0, 4000), now, chatId, config.campaignId, eventAt,
+      sourceEventKey ?? null, sourceEventKey ?? null, config.campaignId, chatId, replyId ?? null).run();
 }
+
+// The committed contribution pointer, not receipt time/update_id, orders processed revisions.
+// REVIEW retains the previous unambiguous version_date/is_edit; its last_event_key identifies
+// the conflicting event. Original identity must still match. Overrides, including zero, resolve it.
+// Legacy rejected: rows have no proven revision and deliberately fail closed.
+const currentWarningSource = `EXISTS(SELECT 1 FROM event_log e JOIN contributions c
+  ON c.source_chat_id=e.source_chat_id AND c.message_id=e.message_id AND c.campaign_id=e.campaign_id
+  WHERE e.event_key=notices.source_event_key AND e.campaign_id=notices.campaign_id
+    AND e.source_chat_id=notices.chat_id AND e.message_id=notices.reply_message_id
+    AND c.original_date=e.original_date AND c.last_event_key=e.event_key AND c.override_amount IS NULL
+    AND ((c.source_state='INVALID' AND e.source_state='INVALID' AND e.outcome='APPLIED'
+      AND c.version_date=e.version_date AND c.is_edit=e.is_edit)
+      OR (c.source_state='REVIEW' AND e.outcome='NEEDS_REVIEW')))`;
 
 export async function deliverNotices(db: D1Database, config: Config, token: string, now = Date.now()): Promise<void> {
   await db.prepare(`UPDATE notices SET state='UNCERTAIN',last_error='Sender lease expired; inspect Telegram before retry'
@@ -25,12 +44,27 @@ export async function deliverNotices(db: D1Database, config: Config, token: stri
         AND (chat_id>0 OR NOT EXISTS(SELECT 1 FROM campaign_controls WHERE campaign_id=? AND silent=1)) RETURNING chat_id,body,reply_message_id,reply_markup`)
       .bind(claim, now, row.notice_key, config.campaignId).first<{ chat_id: number; body: string; reply_message_id: number | null; reply_markup: string | null }>();
     if (!notice) continue;
-    // Publication-policy linearization point: ON committed before this statement prevents the request.
-    // A request already authorized here can still complete after ON (see runbook).
+    // Final source/publication fence. A later D1 commit can still race the external API;
+    // no await is introduced between this read, A02 authorization and transport invocation.
     const permitted = await db.prepare(`SELECT 1 FROM notices WHERE notice_key=? AND state='SENDING' AND claim_token=?
-      AND publication_hold=0 AND (chat_id>0 OR NOT EXISTS(SELECT 1 FROM campaign_controls WHERE campaign_id=? AND silent=1))`)
-      .bind(row.notice_key, claim, config.campaignId).first();
+      AND campaign_id=? AND publication_hold=0
+      AND (chat_id>0 OR NOT EXISTS(SELECT 1 FROM campaign_controls WHERE campaign_id=? AND silent=1))
+      AND (notice_key NOT LIKE 'rejected:%' OR ${currentWarningSource})`)
+      .bind(row.notice_key, claim, config.campaignId, config.campaignId).first();
     if (!permitted) {
+      // Terminal known non-send, never SENT. Audit/state are atomic and claim-fenced.
+      // Recheck in the cancellation transaction: a lost claim cannot cancel another sender.
+      const staleWarning = `notice_key=? AND campaign_id=? AND state='SENDING' AND claim_token=?
+        AND notice_key LIKE 'rejected:%' AND NOT ${currentWarningSource}`;
+      if (row.notice_key.startsWith("rejected:")) await db.batch([
+        db.prepare(`INSERT INTO operational_events(event_key,campaign_id,kind,source_chat_id,message_id,detail,created_at)
+          SELECT ?,campaign_id,'NOTICE_SOURCE_STALE',chat_id,reply_message_id,?,? FROM notices WHERE ${staleWarning}`)
+          .bind(`notice-source-stale:${claim}`, JSON.stringify({ noticeKey: row.notice_key, reason: "SOURCE_REVISION_NOT_CURRENT" }),
+            now, row.notice_key, config.campaignId, claim),
+        db.prepare(`UPDATE notices SET state='FAILED_KNOWN',last_error='Source revision no longer confirms warning',
+          sent_message_id=NULL,claim_token=NULL,claimed_at=NULL WHERE ${staleWarning}`)
+          .bind(row.notice_key, config.campaignId, claim),
+      ]);
       await db.prepare(`UPDATE notices SET state='PENDING',publication_hold=1,claim_token=NULL,claimed_at=NULL
         WHERE notice_key=? AND state='SENDING' AND claim_token=?`).bind(row.notice_key, claim).run();
       continue;

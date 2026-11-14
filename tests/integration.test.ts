@@ -484,7 +484,7 @@ test("TEST sender configuration fails closed for production, partial IDs, self a
   ]) expect(()=>getConfig({...env,...patch})).toThrow();
 });
 
-test("required numeric matrix, media and edits preserve one notice per source in both silence states",async()=>{
+test("required numeric matrix, media and edits preserve one delivery per source in both silence states",async()=>{
   for(const silent of [false,true]) {
     const env=await environment();
     if(silent) {const {setTestSilence:setSilence}=await import("./db");await setSilence(env.DB,testConfig,true,42,"matrix-on",Date.now());}
@@ -503,7 +503,10 @@ test("required numeric matrix, media and edits preserve one notice per source in
       await invoke(env,update);await invoke(env,update);
     }
     expect((await totals(env.DB,"test")).total).toBe("2108");
-    expect(await env.DB.prepare("SELECT COUNT(*) n FROM notices WHERE reply_message_id=802").first("n")).toBe(1);
+    // Unsent revisions are immutable intents. Silence retains all three for explicit review;
+    // outside silence the initial SENT warning still suppresses further warnings for this message.
+    expect(await env.DB.prepare("SELECT COUNT(*) n FROM notices WHERE reply_message_id=802").first("n")).toBe(silent ? 3 : 1);
+    if(silent) expect(await env.DB.prepare("SELECT COUNT(*) n FROM notices WHERE reply_message_id=802 AND publication_hold=1 AND source_event_key IS NOT NULL").first("n")).toBe(3);
     expect(network.mock.calls.length-initialCalls).toBe(silent ? 0:4);
   }
 });

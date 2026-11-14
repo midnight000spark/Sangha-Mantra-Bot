@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { deliverNotices, enqueueNotice, handleAdmin, notifyOperators } from "../src/admin";
 import type { Config } from "../src/types";
 import { setTestSilence, testConfig } from "./db";
+import { ingest } from "../src/core";
 
 const now = Date.parse("2026-11-10T21:05:00Z");
 const denied = "Administrator access revoked before notice delivery";
@@ -173,7 +174,10 @@ export function noticeAuthorizationCases(label: string, open: () => Promise<{ db
   });
 
   run("ordinary participant private and group notices bypass admin authority", async () => {
-    await queue("participant:queued", 77); await queue("rejected:-1001:7", -1001);
+    await queue("participant:queued", 77);
+    await ingest(db, config, { key: "auth-group-source", updateId: 1, chatId: -1001, messageId: 7, userId: 77,
+      originalDate: now / 1000, versionDate: now / 1000, isEdit: false, amount: 0, state: "INVALID", reason: "fixture", now });
+    await enqueueNotice(db, config, "rejected:-1001:7", -1001, "sensitive fixture body", now, 7, now, "auth-group-source");
     Object.defineProperty(config, "adminIds", { get() { throw new Error("must not check participant authority"); } });
     await deliver(); await deliver();
     expect(sends.map(s => s.chat_id).sort((a, b) => a - b)).toEqual([-1001, 77]);
