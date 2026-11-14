@@ -1,0 +1,66 @@
+{
+  "package": "A04",
+  "date": "2026-11-14",
+  "base": "a8105e768d3851c96d7633868299d8e0b08af554",
+  "scope": "Local maintenance 1.x boundary/incident regression and audit/legacy coverage evidence",
+  "productionCodeChanged": false,
+  "fixtureClass": "SYNTHETIC_LOCAL_REGRESSION",
+  "historicalSource": {
+    "reference": "docs/planning/BASELINE_AND_DELTAS.md#ev05",
+    "class": "OWNER_OBSERVED_INHERITED",
+    "independentlyRecheckedLive": false,
+    "report35": { "previousSnapshot": 32050, "day": 26500, "correction": 5000, "publishedTotal": 63550 },
+    "zeroOverrides": { "32": 0, "38": 0 },
+    "correction35ActualExecution": "UNKNOWN",
+    "actualCurrentTotal": "UNKNOWN",
+    "productionBoundary": "UNKNOWN"
+  },
+  "legacyCoverage": {
+    "openingAmount": 14950,
+    "openingOriginalKey": "UNKNOWN",
+    "openingMemberEnumeration": "UNKNOWN",
+    "openingCompleteness": "UNKNOWN",
+    "opening35Membership": "OWNER_REPORTED_NOT_INDEPENDENTLY_VERIFIED",
+    "causalCoverage": "PARTIAL",
+    "knownFacts": [
+      "Missing contribution row does not prove absence from aggregate14950",
+      "Synthetic id900, source41=17100 and source42=26500 are balancing fixture keys/amounts, not recovered historical members",
+      "58550 is a synthetic result after explicit correction, never evidence of the current production total",
+      "No complete ledger/report causal trace is reconstructed from legacy data"
+    ]
+  },
+  "currentAuditContract": {
+    "event_log": "Unique event_key; per-attempt nonce; original/version time, receipt time; outcome and old/new effective amount",
+    "admin_adjustments": "Unique adjustment_key; per-attempt nonce; actor/reason/action; old/new effective amount",
+    "daily_reports": "Immutable snapshot and separate report_audit; rerun does not rewrite published snapshot",
+    "limitations": [
+      "No v2 global commit sequence or complete correlation/causation contract",
+      "No ImportBatch/Coverage membership table in 1.x",
+      "1.x explicit import trusts operator authorization/reason; it cannot prove aggregate coverage or deduplicate different original keys",
+      "A repeated import key is idempotent; this does not prove a different original key is uncovered",
+      "A DB restore cannot recover updates missing from its snapshot; receipt completeness and external publication status require reconciliation"
+    ]
+  },
+  "localAssertions": [
+    { "case": "absent32/35/38", "test": "tests/intake-boundary-cases.ts", "engines": ["SQLite", "D1/workerd"], "assertion": "Three distinct edits, late original, exact replays, forward/reverse order: REJECTED, no contribution, every event delta0, opening total14950 unchanged" },
+    { "case": "boundaryPredicates", "test": "tests/intake-boundary-cases.ts", "assertion": "Inclusive first_message_id and original message.date, individually and jointly; a recent edit_date cannot bypass either predicate" },
+    { "case": "existing32/35/38", "test": "tests/intake-boundary-cases.ts", "assertion": "Installing boundary changes no contribution; subsequent stale/new/replayed edits preserve zero32/38; existing35 stays5000 until explicit override0; existing records can be edited even if boundary is missing" },
+    { "case": "import14950", "test": "tests/intake-boundary-cases.ts", "assertion": "Same import key once, different key on same original rejected, edits preserve explicit opening override; no membership inference" },
+    { "case": "incident35", "test": "tests/intake-boundary-cases.ts", "assertion": "Real report SQL yields32050+26500+5000=63550; event35 delta sum5000; only explicit idempotent adjustment gives58550; published snapshot unchanged" },
+    { "case": "noInventedBoundary", "test": "tests/intake-boundary-cases.ts", "assertion": "Repeated initialize, including synthetic production identity, leaves boundary empty; new ingestion fails closed and reports pause" },
+    { "case": "newSource", "test": "tests/intake-boundary-cases.ts", "assertion": "Configured alias has no inherited boundary; own ID/time marker required; source identities remain separate" },
+    { "case": "compiledWorker", "test": "tests/intake-boundary-runtime.test.ts", "assertion": "Actual webhook parser to D1: old32/35/38 x3 plus original give no row or outbound call; Telegram group migration creates alias without copying boundary; health/init do not enroll it" },
+    { "case": "restoreReplay", "test": "tests/intake-boundary-runtime.test.ts", "assertion": "Synthetic D1 snapshot to AES-GCM archive to separate SQLite restore to new D1; all boundary/contribution/event/adjustment rows equal before replay, zero32/38 and uncorrected35 survive, import stays once, unseen old messages rejected, reports held; missing restored boundary is never invented" },
+    { "case": "wranglerBackup", "command": "bun run backup:drill", "assertion": "Actual local Wrangler D1 export, authenticated restore, SQL reimport, generated total, holds/order/boundary, wrong key and tampering rejection" }
+  ],
+  "boundariesOfVerification": {
+    "localD1Workerd": true,
+    "remoteCloudflare": false,
+    "realTelegram": false,
+    "productionReadOrWrite": false,
+    "providerPITR": "NOT_RUN_A05_SEPARATE_SCOPE",
+    "nativeHumanTest": "NOT_RUN_A06_SEPARATE_SCOPE",
+    "capacity": "UNKNOWN",
+    "productionAuthorization": false
+  }
+}
