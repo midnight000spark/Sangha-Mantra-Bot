@@ -2,6 +2,12 @@ import { initialize } from "../src/config";
 import { Database } from "bun:sqlite";
 import { Glob } from "bun";
 import type { Config } from "../src/types";
+import { setSilence } from "../src/controls";
+
+/** Synthetic command source for older fixtures that use millisecond clocks. */
+export function setTestSilence(db: D1Database, config: Config, on: boolean, actor: number, key: string, now: number) {
+  return setSilence(db, config, on, actor, key, now, { sentAt: now, chatId: actor, messageId: 1 });
+}
 
 export const testConfig: Config = {
   campaignId: "test", timezone: "Europe/Moscow", startDay: "2026-11-01", reportTime: "00:05",
@@ -9,11 +15,13 @@ export const testConfig: Config = {
 };
 
 /** Small SQLite adapter for fast SQL invariants. Actual Worker/D1 is checked with Miniflare separately. */
-export async function createTestDb(): Promise<D1Database> {
+export async function createTestDb(throughMigration?: string): Promise<D1Database> {
   const sqlite = new Database(":memory:");
   sqlite.exec("PRAGMA foreign_keys=ON");
   const files = Array.from(new Glob("*.sql").scanSync("migrations")).sort();
-  for (const file of files) sqlite.exec(await Bun.file(`migrations/${file}`).text());
+  for (const file of files) {
+    if (!throughMigration || file <= throughMigration) sqlite.exec(await Bun.file(`migrations/${file}`).text());
+  }
   const executions = new WeakMap<D1PreparedStatement, () => unknown>();
   const prepare = (sql: string, values: unknown[] = []): D1PreparedStatement => {
     const execute = () => ({success:true,results:sqlite.query(sql).all(...values as never[]),meta:{changes:(sqlite.query("SELECT changes() n").get() as {n:number}).n}});

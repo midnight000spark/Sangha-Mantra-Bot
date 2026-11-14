@@ -7,29 +7,55 @@ export async function silenceState(db: D1Database, campaignId: string) {
     ?? { silent: 0, changed_at: null, changed_by: null, held_reports_through: null, notices_not_before: null };
 }
 
-/** Replay-safe command and holds commit together. Repeating ON does not rewrite the last change. */
-export async function setSilence(db: D1Database, config: Config, on: boolean, actor: number, key: string, now: number) {
+export interface SilentCommandSource {
+  sentAt: number; // Original Telegram message.date * 1000, never receipt time.
+  chatId: number;
+  messageId: number;
+}
+
+/** Source order, receipt, policy and holds commit together. */
+export async function setSilence(db: D1Database, config: Config, on: boolean, actor: number, key: string, now: number, source: SilentCommandSource) {
   if (!config.adminIds.includes(actor)) throw new Error("Administrator is not authorized");
+  if (!Number.isSafeInteger(source.sentAt) || source.sentAt <= 0 || source.chatId !== actor
+    || !Number.isSafeInteger(source.messageId) || source.messageId <= 0) throw new Error("Invalid private command source");
   const nonce = crypto.randomUUID();
-  const gate = "EXISTS(SELECT 1 FROM operational_events WHERE event_key=? AND json_extract(detail,'$.nonce')=?)";
+  const receiptGate = "EXISTS(SELECT 1 FROM operational_events WHERE event_key=? AND json_extract(detail,'$.nonce')=?)";
+  const gate = "EXISTS(SELECT 1 FROM campaign_silent_watermarks WHERE campaign_id=? AND nonce=?)";
+  // At the latest source time, each admin's highest message ID wins; any
+  // remaining ON dominates OFF from other admins. Keeping all admin watermarks
+  // avoids losing A's ON when B sends ON then OFF in the same second.
+  const desired = `SELECT MAX(silent) FROM campaign_silent_watermarks WHERE campaign_id=?
+    AND command_at=(SELECT MAX(command_at) FROM campaign_silent_watermarks WHERE campaign_id=?)`;
   const through = latestReportDay(now, config.timezone, config.reportTime);
   await db.batch([
-    db.prepare(`INSERT INTO operational_events(event_key,campaign_id,kind,actor_id,detail,created_at)
-      VALUES(?,?,'SILENT_CHANGE',?,?,?) ON CONFLICT(event_key) DO NOTHING`)
-      .bind(key, config.campaignId, actor, JSON.stringify({ on, nonce }), now),
+    db.prepare(`INSERT INTO operational_events(event_key,campaign_id,kind,actor_id,source_chat_id,message_id,detail,created_at)
+      VALUES(?,?,'SILENT_CHANGE',?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`)
+      .bind(key, config.campaignId, actor, source.chatId, source.messageId, JSON.stringify({ on, nonce, sentAt: source.sentAt }), now),
+    db.prepare(`INSERT INTO campaign_silent_watermarks(campaign_id,actor_id,source_chat_id,command_at,message_id,silent,nonce)
+      SELECT ?,?,?,?,?,?,? WHERE ${receiptGate}
+        AND NOT EXISTS(SELECT 1 FROM campaign_silent_watermarks WHERE campaign_id=? AND command_at>?)
+        AND NOT EXISTS(SELECT 1 FROM recovery_state WHERE campaign_id=? AND restored_at>=?)
+      ON CONFLICT(campaign_id,actor_id,source_chat_id) DO UPDATE SET command_at=excluded.command_at,
+        message_id=excluded.message_id,silent=excluded.silent,nonce=excluded.nonce
+      WHERE excluded.command_at>campaign_silent_watermarks.command_at
+        OR (excluded.command_at=campaign_silent_watermarks.command_at AND excluded.message_id>campaign_silent_watermarks.message_id)`)
+      .bind(config.campaignId, actor, source.chatId, source.sentAt, source.messageId, Number(on), nonce,
+        key, nonce, config.campaignId, source.sentAt, config.campaignId, source.sentAt),
     db.prepare(`INSERT INTO campaign_controls(campaign_id,silent,changed_at,changed_by,held_reports_through,notices_not_before)
-      SELECT ?,?,?,?,NULL,NULL WHERE ${gate}
+      SELECT ?,(${desired}),?,?,NULL,NULL WHERE ${gate}
       ON CONFLICT(campaign_id) DO UPDATE SET silent=excluded.silent,changed_at=excluded.changed_at,changed_by=excluded.changed_by,
         held_reports_through=CASE WHEN excluded.silent=0 THEN MAX(COALESCE(campaign_controls.held_reports_through,''),?)
           ELSE campaign_controls.held_reports_through END,
         notices_not_before=CASE WHEN excluded.silent=0 THEN excluded.changed_at ELSE campaign_controls.notices_not_before END
       WHERE campaign_controls.silent<>excluded.silent`)
-      .bind(config.campaignId, Number(on), now, actor, key, nonce, through),
+      .bind(config.campaignId, config.campaignId, config.campaignId, now, actor, config.campaignId, nonce, through),
     // Include SENDING: the final pre-send gate will release a claimed but unstarted request.
     db.prepare(`UPDATE notices SET publication_hold=1 WHERE campaign_id=? AND chat_id<0 AND state<>'SENT'
-      AND ?=1 AND ${gate}`).bind(config.campaignId, Number(on), key, nonce),
+      AND ?=1 AND ${gate}`).bind(config.campaignId, Number(on), config.campaignId, nonce),
     db.prepare(`UPDATE daily_reports SET publication_hold=1 WHERE campaign_id=? AND status<>'SENT'
-      AND ?=1 AND ${gate}`).bind(config.campaignId, Number(on), key, nonce),
+      AND ?=1 AND ${gate}`).bind(config.campaignId, Number(on), config.campaignId, nonce),
+    db.prepare(`UPDATE operational_events SET detail=json_set(detail,'$.accepted',CASE WHEN ${gate} THEN 1 ELSE 0 END)
+      WHERE event_key=? AND json_extract(detail,'$.nonce')=?`).bind(config.campaignId, nonce, key, nonce),
   ]);
   return silenceState(db, config.campaignId);
 }

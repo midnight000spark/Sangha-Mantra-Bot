@@ -438,7 +438,7 @@ test("opt-in TEST diagnostics persist structural evidence for ignored group cont
 
 test("invalid numeric inputs warn once outside silence; silence backlog stays held",async()=>{
   const env=await environment();
-  const {setSilence}=await import("../src/controls");
+  const {setTestSilence:setSilence}=await import("./db");
   const invalid=payload("1.5",601);
   expect((await invoke(env,invalid)).status).toBe(200);await invoke(env,invalid);
   expect(network).toHaveBeenCalledTimes(1);
@@ -487,7 +487,7 @@ test("TEST sender configuration fails closed for production, partial IDs, self a
 test("required numeric matrix, media and edits preserve one notice per source in both silence states",async()=>{
   for(const silent of [false,true]) {
     const env=await environment();
-    if(silent) {const {setSilence}=await import("../src/controls");await setSilence(env.DB,testConfig,true,42,"matrix-on",Date.now());}
+    if(silent) {const {setTestSilence:setSilence}=await import("./db");await setSilence(env.DB,testConfig,true,42,"matrix-on",Date.now());}
     const initialCalls=network.mock.calls.length;
     const texts=["1000","1000🙏","10 и 10","1000 2000","1.5","0","Привет"];
     for(const [i,text] of texts.entries()) {

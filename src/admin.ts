@@ -134,7 +134,8 @@ export async function handleAdmin(db: D1Database, config: Config, message: Teleg
       if (!["on","off","status"].includes(action) || words.length > 2) reply = "Используйте /silent on, /silent off или /silent status.";
       else {
         const state = action === "status" ? await silenceState(db, config.campaignId)
-          : await setSilence(db, config, action === "on", actorId, key, now);
+          : await setSilence(db, config, action === "on", actorId, key, now,
+            { sentAt: message.date * 1000, chatId: message.chat.id, messageId: message.message_id });
         if (action === "status") await db.prepare(`INSERT INTO operational_events(event_key,campaign_id,kind,actor_id,detail,created_at)
           VALUES(?,?,'SILENT_STATUS',?,'Read silence status',?) ON CONFLICT(event_key) DO NOTHING`).bind(key,config.campaignId,actorId,now).run();
         reply = `Тишина: ${state.silent ? "включена" : "выключена"}.\nПоследнее изменение: ${dateText(state.changed_at, config)}; ответственный: ${state.changed_by ?? "неизвестен"}.\nУчёт накоплений и личное управление продолжаются.\n${state.silent ? "Группа молчит. Уже разрешённый запрос в Telegram может завершиться." : "Новые публикации разрешены. Удержанные остаются на проверке: /reports, /notices; /report_retry или /notice_retry разрешает одну после проверки."}`;

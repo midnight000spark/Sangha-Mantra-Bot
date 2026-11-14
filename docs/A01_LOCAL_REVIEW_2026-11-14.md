@@ -1,0 +1,39 @@
+# A01 / F04 — локальная реализация для независимого ревью
+
+14.11.2026. Статус: LOCAL_VERIFIED, независимое code review ещё не выполнено. Реализован только A01. A02/F03 и A03/F05 остаются открыты; разрешение на merge/deployment этим результатом не выдаётся.
+
+Репозиторий: `sangha-mantra-bot-public`. Исходный и текущий Git HEAD: `b7cc125a47c4b791cdafefcd22dbc1859a8f126f`. Нового commit нет; index не изменялся. Проверенные изменения находятся в рабочем дереве. Идентификатор содержимого девяти файлов кода/миграции/тестов — SHA-256 файла `source-files.sha256`: `a39dc1b206d7df821986a081a1cc12aa7187b3d65276dddb9826306e420447bd`. Это content digest, не Git commit SHA.
+
+Входной пакет `docs/planning/` уже был untracked до работы и оставлен без изменений. Его PLANNED/NOT IMPLEMENTED описывают предшествующую docs-only сессию; текущий локальный статус A01 зафиксирован здесь. Проверены SESSION_STATE, BACKLOG, DECISIONS и относящиеся к A01 MASTER_PLAN/SC08: все четыре решения EV09 присутствуют, пропусков не обнаружено. Самостоятельный B28 не блокирует fresh install; pause начинается после final confirm/DB commit без обратной силы; для текущего production принята D1 Time Travel policy; P0 предшествуют функциям. MASTER PLAN не перерабатывался.
+
+F04: `operational_events` раньше дедуплицировал повторный receipt, но впервые доставленный старый OFF применялся по времени обработки. Он отменял более поздний ON и сдвигал cutoffs. Теперь `handleAdmin` передаёт исходные `message.date * 1000`, private chat ID и message ID. Время обработки остаётся временем аудита/фактической смены состояния, а не порядком команд.
+
+Миграция `0008_silent_command_order.sql` добавляет `campaign_silent_watermarks`: по одному source watermark на campaign/actor/private chat. Выбирается максимальное исходное время; внутри одного actor/chat — максимальный message ID. Среди текущих команд разных actors в этот момент действует ON, если хотя бы у одного actor остаётся ON. Это сохраняет ON администратора A при последовательности ON → OFF администратора B в ту же секунду. Между private chats message IDs не сравниваются. OFF с более поздним временем может выключить режим.
+
+Receipt, продвижение watermark, смена policy, group notice/report holds и признак `accepted` в audit фиксируются одним D1 batch. Stale/replayed source не меняет policy, watermarks, cutoffs или holds. Повторный свежий ON продвигает source order без переписывания `changed_at`/`changed_by`. OFF не освобождает старые holds. Recovery boundary проверяется также внутри SQL gate. `accepted` означает принятие source version; оно не обязательно означает изменение silent state.
+
+Миграция не изменяет прежние controls, ledger или outbox. У legacy записей нет достоверного исходного времени команды: sentinel actor/chat 0 консервативно удерживает текущую policy на секунде последнего известного `SILENT_CHANGE.created_at` либо `changed_at`. Для снятия legacy ON требуется команда со строго более поздней исходной секундой. Это может отвергнуть допустимый OFF из той же секунды; оператор отправляет новый OFF позже. Исторический source order не выдумывается.
+
+Изменены девять файлов реализации: `src/admin.ts`, `src/controls.ts`, `migrations/0008_silent_command_order.sql`, `scripts/backup-drill.ts`, `tests/db.ts`, `tests/integration.test.ts`, `tests/maintenance.test.ts`, `tests/maintenance-runtime.test.ts`, `tests/silent-order.test.ts`. Десятый файл пакета — этот handoff. Старые fixtures используют явно синтетический `setTestSilence`; production API требует source metadata без fallback к receipt time.
+
+| Проверка | Фактический результат | Локальный evidence |
+|---|---|---|
+| Исходная регрессионная серия до исправления | 6 PASS, 7 FAIL; ожидаемый red | `test-results/a01/regression-before.log` |
+| Текущий F04 test на изолированной копии base SHA, `bun test tests/silent-order.test.ts -t 'F04: first delivery'` | 0 PASS, 1 FAIL, exit 1; ожидаемо: старый OFF меняет silent 1 → 0 и cutoffs | `test-results/a01/base-f04-replay.log`, `.json` |
+| Расширенный адресный запуск до исправления ожидания HTTP test | 39 PASS, 1 FAIL; ошибочное ожидание исправлено, затем полный набор PASS | `test-results/a01/focused.log`, `focused-http-assertion-failed.log` |
+| Финальный `CI=true WRANGLER_SEND_METRICS=false bun run check` | typecheck PASS; 208 PASS, 0 FAIL, 950 assertions, 17 files; exit 0 | `test-results/a01/check-final.log` |
+| `CI=true WRANGLER_SEND_METRICS=false bun run build` | PASS, exit 0; Wrangler `deploy --dry-run --env test`, без upload/deploy | `test-results/a01/build.log` |
+| `CI=true WRANGLER_SEND_METRICS=false bun run scripts/backup-drill.ts` | PASS, exit 0; `silentSourceOrderPreserved: true`, total 3108, AES-GCM/tamper/wrong-key checks | `test-results/a01/backup-drill.log` |
+| Whitespace и применимость экспортированного diff | Проверяются при упаковке; результаты/exit codes в manifest | `test-results/a01/manifest.json` |
+
+Первые runtime tests были заблокированы sandbox (`EPERM: listen`), затем 37 тестов прошли после разрешённого локального запуска. `focused.log` позднее содержит промежуточный запуск 39 PASS / 1 FAIL: новая HTTP-проверка ошибочно ожидала отсутствие всех group sends, хотя свежая публикация после OFF должна отправиться. Полная копия этого падения сохранена в `focused-http-assertion-failed.log`; исправлено только ожидание теста. Все последующие полные проверки прошли; финальный authoritative log — `check-final.log`.
+
+В финальном наборе есть SQLite-adapter regressions и настоящий локальный workerd/D1 SQL, включая HTTP собранного Worker с полностью подменённым Telegram transport. Проверены old first OFF, repeated ON по времени и message ID, обе перестановки одного actor, шесть перестановок двух actors, concurrent batches/replay, stale ON без побочных holds, сохранение OFF cutoffs, старые/односекундные recovery commands, failed-hold transaction rollback с успешным retry, upgrade 0007 → 0008 на заполненной БД и сохранение watermark при backup/restore/SQL reimport. Существующие tests также проверяют final-send gate, held releases, UNCERTAIN и продолжение учёта во время silent.
+
+Окружение: Linux x64; Bun 1.4.4 (`38afee6c8`); Node v22.23.4; TypeScript 7.0.2; Miniflare 4.20260730.0; workerd 1.20260730.1; Wrangler 4.160.0; schema migrations 0001–0008. Существующий lockfile и зависимости не менялись. Это local synthetic evidence: не native Telegram, не remote Cloudflare D1 и не Node v2 adapter.
+
+Перед запуском нового binary нужна миграция 0008. Старый binary не поддерживает новые watermarks: concurrent writers разных версий и downgrade/fallback здесь не проверялись, они остаются scope A05/A08. Уже разрешённый final-send gate запрос может завершиться после ON. Capacity/analytics, long native silent cycle, live recovery/drain/cutover и production readiness не проверялись. Hot path silent command вырос с 4 до 6 SQL statements плюс прежний read; запросы watermark ограничены строками одной кампании, performance PASS не заявляется.
+
+Production, удалённые DB/webhook/Cron, Telegram API, реальные secrets и удалённый Git не изменялись. Deploy, push, merge, commit, PR/comment не выполнялись. Использован существующий локальный backup drill с синтетическим ключом; новый external backup executor не создавался.
+
+Для ревью подготовлены `test-results/a01/A01.patch`, `manifest.json`, `source-files.sha256`, `source-snapshot.sha256`, `planning-inputs.sha256` и полные логи. Patch содержит только перечисленные десять файлов и применим к чистой копии base SHA. В чистой локальной копии сначала выполнить `git apply --check <A01.patch>`, затем применить patch и повторить три финальные команды проверки из таблицы с установленными pinned dependencies. Входные planning docs в patch не включены. Артефакты под `test-results/` намеренно остаются локальными и игнорируются Git; их хеши приведены в manifest.
