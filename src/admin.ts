@@ -25,7 +25,7 @@ export async function deliverNotices(db: D1Database, config: Config, token: stri
         AND (chat_id>0 OR NOT EXISTS(SELECT 1 FROM campaign_controls WHERE campaign_id=? AND silent=1)) RETURNING chat_id,body,reply_message_id,reply_markup`)
       .bind(claim, now, row.notice_key, config.campaignId).first<{ chat_id: number; body: string; reply_message_id: number | null; reply_markup: string | null }>();
     if (!notice) continue;
-    // Linearization point: ON committed before this statement prevents the request.
+    // Publication-policy linearization point: ON committed before this statement prevents the request.
     // A request already authorized here can still complete after ON (see runbook).
     const permitted = await db.prepare(`SELECT 1 FROM notices WHERE notice_key=? AND state='SENDING' AND claim_token=?
       AND publication_hold=0 AND (chat_id>0 OR NOT EXISTS(SELECT 1 FROM campaign_controls WHERE campaign_id=? AND silent=1))`)
@@ -35,10 +35,25 @@ export async function deliverNotices(db: D1Database, config: Config, token: stri
         WHERE notice_key=? AND state='SENDING' AND claim_token=?`).bind(row.notice_key, claim).run();
       continue;
     }
-    const result = row.notice_key.startsWith("ui:") && !config.adminIds.includes(notice.chat_id)
-      ? { state: "FAILED_KNOWN" as const, error: "Administrator access revoked before dialog delivery" }
-      : await sendTelegramMessage(token, notice.chat_id, notice.body, notice.reply_message_id ?? undefined,
-        notice.reply_markup ? JSON.parse(notice.reply_markup) as ReplyMarkup : undefined);
+    // All administrative outbox producers use these namespaces, including operator alerts.
+    // 1.x authority is the executing Worker's config, not a DB grant: old envs require drain.
+    // Recheck after the last awaited read. An already authorized API request cannot be revoked.
+    if (/^(?:ui|admin|alert):/.test(row.notice_key) && !config.adminIds.includes(notice.chat_id)) {
+      await db.batch([
+        db.prepare(`INSERT INTO operational_events(event_key,campaign_id,kind,source_chat_id,detail,created_at)
+          SELECT ?,campaign_id,'NOTICE_AUTH_DENIED',chat_id,?,? FROM notices
+          WHERE notice_key=? AND campaign_id=? AND state='SENDING' AND claim_token=?`)
+          .bind(`notice-auth-denied:${claim}`, JSON.stringify({ noticeKey: row.notice_key, reason: "ADMIN_ACCESS_REVOKED" }),
+            now, row.notice_key, config.campaignId, claim),
+        db.prepare(`UPDATE notices SET state='FAILED_KNOWN',last_error='Administrator access revoked before notice delivery',
+          sent_message_id=NULL,claim_token=NULL,claimed_at=NULL
+          WHERE notice_key=? AND campaign_id=? AND state='SENDING' AND claim_token=?`)
+          .bind(row.notice_key, config.campaignId, claim),
+      ]);
+      continue;
+    }
+    const result = await sendTelegramMessage(token, notice.chat_id, notice.body, notice.reply_message_id ?? undefined,
+      notice.reply_markup ? JSON.parse(notice.reply_markup) as ReplyMarkup : undefined);
     await db.prepare(`UPDATE notices SET state=?,sent_message_id=?,last_error=?
       WHERE notice_key=? AND state='SENDING' AND claim_token=?`)
       .bind(result.state, result.state === "SENT" ? result.messageId : null, result.state === "SENT" ? null : result.error,

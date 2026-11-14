@@ -105,7 +105,8 @@ test("admin rights, private owner and forwarding restrictions are checked at eve
   await send("999", await promptId()); await click("c", String(before.id));
   expect((await session()).state).toBe("AMOUNT");
   expect(await count("admin_adjustments")).toBe(0);
-  expect(await count("operational_events")).toBe(3);
+  expect(await count("operational_events")).toBe(5);
+  expect(await db.prepare("SELECT COUNT(*) n FROM operational_events WHERE kind='NOTICE_AUTH_DENIED'").first("n")).toBe(2);
   config = { ...config, adminIds: [42, 43] };
   const forwarded = { ...message("https://t.me/c/1/1"), forward_origin: { type: "chat" } };
   await handleAdminDialog(db, config, { message: forwarded }, "forward", ++clock, "local-token");
