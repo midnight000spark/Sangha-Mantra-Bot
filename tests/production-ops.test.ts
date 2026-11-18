@@ -19,17 +19,42 @@ test("production operations reject swapped D1, chat, account and TEST targets", 
   }
 });
 
-test.skipIf(!Bun.which("systemd-analyze") || !process.env.XDG_RUNTIME_DIR)("generated maintenance units are accepted by the actual user systemd parser without starting a service", async () => {
+test.skipIf(!Bun.which("systemd-analyze"))("generated maintenance units pass an isolated user systemd parser that rejects invalid units", async () => {
   const directory = await mkdtemp(join(tmpdir(), "mantra-unit-test-"));
   try {
     const units = maintenanceUnits(process.cwd(), process.execPath);
-    const paths = [];
+    const paths: string[] = [];
     for (const [extension, content] of Object.entries(units)) {
       const path = join(directory, `sangha-mantra-production-maintenance.${extension}`);
       await writeFile(path, content); paths.push(path);
     }
-    const child = Bun.spawn(["systemd-analyze", "--user", "verify", ...paths], { stdout: "pipe", stderr: "pipe" });
-    const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
-    expect(stderr).not.toContain("bad unit file"); expect(code).toBe(0);
+    const verify = async () => {
+      // Do not load the operator's user units, drop-ins, runtime state or generators.
+      // Keep the real vendor dependencies and executable checks; no stub targets.
+      const child = Bun.spawn(["systemd-analyze", "--user", "--generators=no", "--man=no", "--recursive-errors=yes", "verify", ...paths], {
+        env: {
+          PATH: process.env.PATH,
+          HOME: directory,
+          XDG_RUNTIME_DIR: directory,
+          SYSTEMD_UNIT_PATH: `${directory}:/usr/local/lib/systemd/user:/usr/lib/systemd/user:/lib/systemd/user`,
+        },
+        stdout: "pipe", stderr: "pipe",
+      });
+      const [code, stdout, stderr] = await Promise.all([child.exited, new Response(child.stdout).text(), new Response(child.stderr).text()]);
+      return { code, stdout, stderr };
+    };
+    const valid = await verify();
+    expect(valid).toEqual({ code: 0, stdout: "", stderr: "" });
+
+    const service = join(directory, "sangha-mantra-production-maintenance.service");
+    await writeFile(service, units.service + "A06UnknownDirective=yes\n");
+    const unknownDirective = await verify();
+    expect(unknownDirective.code).not.toBe(0);
+    expect(unknownDirective.stderr).toContain("A06UnknownDirective");
+
+    await writeFile(service, units.service.replace(process.execPath, join(directory, "missing-executable")));
+    const missingExecutable = await verify();
+    expect(missingExecutable.code).not.toBe(0);
+    expect(missingExecutable.stderr).toContain("missing-executable");
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

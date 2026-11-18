@@ -1,5 +1,7 @@
 # Автономная Telegram-приёмка
 
+Для A06 human/native acceptance использовать [отдельный TEST protocol](A06_NATIVE_TEST_E2E_PLAN.md), resource matrix и receipt. Описанный ниже bot-to-bot runner не закрывает SC27. Подготовка A06 не разрешает запуск этого runner или его setup.
+
 `scripts/telegram-e2e.py` использует настоящие sendMessage/editMessageText/sendPhoto/sendVideo/getUpdates и отдельные TEST Worker/D1. Настоящие сообщения и ответы наблюдаются через Telegram; итог и outbox сверяются read-only запросами к настоящей TEST D1. Синтетические вклады в D1 не записываются. Начальный enrollment относится только к новой тестовой кампании после реального marker-сообщения.
 
 ## Подготовка
