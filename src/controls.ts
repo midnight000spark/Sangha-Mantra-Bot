@@ -60,21 +60,26 @@ export async function setSilence(db: D1Database, config: Config, on: boolean, ac
   return silenceState(db, config.campaignId);
 }
 
-/** Intentionally held, never-attempted reports have no UNCERTAIN resolution to reuse. */
-export async function releaseHeldReport(db: D1Database, config: Config, day: string, actor: number, key: string, reason: string, now: number) {
-  if (!config.adminIds.includes(actor)) throw new Error("Administrator is not authorized");
-  const nonce = crypto.randomUUID();
-  const rows = await db.batch([
+/** Prepared held-release statements, shared by the standalone helper and the unified decision batch. */
+export function heldReleaseStatements(db: D1Database, config: Config, day: string, actor: number, key: string, reason: string, now: number, nonce: string): D1PreparedStatement[] {
+  return [
     db.prepare(`INSERT INTO operational_events(event_key,campaign_id,kind,actor_id,detail,created_at)
       SELECT ?,?,'HELD_REPORT_RELEASE',?,?,? WHERE EXISTS(SELECT 1 FROM daily_reports
         WHERE campaign_id=? AND day=? AND status='PENDING' AND publication_hold=1)
         AND NOT EXISTS(SELECT 1 FROM campaign_controls WHERE campaign_id=? AND silent=1)
         AND NOT EXISTS(SELECT 1 FROM report_resolutions WHERE idempotency_key=?)
+        AND NOT EXISTS(SELECT 1 FROM notices WHERE notice_key='admin:'||?)
       ON CONFLICT(event_key) DO NOTHING`)
-      .bind(key, config.campaignId, actor, JSON.stringify({ day, reason, nonce }), now, config.campaignId, day, config.campaignId, key),
+      .bind(key, config.campaignId, actor, JSON.stringify({ day, reason, nonce }), now, config.campaignId, day, config.campaignId, key, key),
     db.prepare(`UPDATE daily_reports SET publication_hold=0,updated_at=? WHERE campaign_id=? AND day=? AND status='PENDING'
       AND EXISTS(SELECT 1 FROM operational_events WHERE event_key=? AND json_extract(detail,'$.nonce')=?) RETURNING day`)
       .bind(now, config.campaignId, day, key, nonce),
-  ]);
+  ];
+}
+
+/** Intentionally held, never-attempted reports have no UNCERTAIN resolution to reuse. */
+export async function releaseHeldReport(db: D1Database, config: Config, day: string, actor: number, key: string, reason: string, now: number) {
+  if (!config.adminIds.includes(actor)) throw new Error("Administrator is not authorized");
+  const rows = await db.batch(heldReleaseStatements(db, config, day, actor, key, reason, now, crypto.randomUUID()));
   return (rows[1]?.results.length ?? 0) > 0;
 }

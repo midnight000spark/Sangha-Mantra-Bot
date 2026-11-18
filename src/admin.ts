@@ -3,7 +3,7 @@ import { adminHelp, dateText, inspectText, number, stateText } from "./admin-tex
 import { silenceState, setSilence } from "./controls";
 import type { Config } from "./types";
 import { adjust, DomainError, importContribution, inspect, totals } from "./core";
-import { resolveReport } from "./reports";
+import { decideReport } from "./reports";
 import { sendTelegramMessage, type ReplyMarkup, type TelegramMessage } from "./telegram";
 
 export async function enqueueNotice(db: D1Database, config: Config, key: string, chatId: number, body: string, now: number, replyId?: number, eventAt = now, sourceEventKey?: string): Promise<void> {
@@ -31,17 +31,31 @@ const currentWarningSource = `EXISTS(SELECT 1 FROM event_log e JOIN contribution
       AND c.version_date=e.version_date AND c.is_edit=e.is_edit)
       OR (c.source_state='REVIEW' AND e.outcome='NEEDS_REVIEW')))`;
 
+// For rejected: warnings the send identity is campaign + source chat + source message.
+// Another attempt in SENDING/UNCERTAIN/SENT closes automatic delivery; proven known
+// non-sends (FAILED_KNOWN) do not. Legacy rows block by proven route/IDs even without a source key.
+const blockingSibling = `EXISTS(SELECT 1 FROM notices o WHERE o.campaign_id=notices.campaign_id
+  AND o.chat_id=notices.chat_id AND o.reply_message_id=notices.reply_message_id
+  AND o.notice_key LIKE 'rejected:%' AND o.notice_key<>notices.notice_key
+  AND o.state IN ('SENDING','UNCERTAIN','SENT'))`;
+// Unbound legacy candidates keep their existing fail-closed source triage (FAILED_KNOWN);
+// they still block bound revisions above. Bound blocked intents stay PENDING for manual review.
+const siblingFence = `(notice_key NOT LIKE 'rejected:%' OR source_event_key IS NULL OR NOT ${blockingSibling})`;
+
 export async function deliverNotices(db: D1Database, config: Config, token: string, now = Date.now()): Promise<void> {
   await db.prepare(`UPDATE notices SET state='UNCERTAIN',last_error='Sender lease expired; inspect Telegram before retry'
     WHERE campaign_id=? AND state='SENDING' AND claimed_at<?`).bind(config.campaignId, now - 300_000).run();
+  // Prefilter blocked siblings before LIMIT so they cannot starve independent notices.
   const pending = await db.prepare(`SELECT notice_key FROM notices WHERE campaign_id=? AND state='PENDING' AND publication_hold=0
-      AND (chat_id>0 OR NOT EXISTS(SELECT 1 FROM campaign_controls WHERE campaign_id=? AND silent=1)) ORDER BY created_at LIMIT 2`)
+      AND (chat_id>0 OR NOT EXISTS(SELECT 1 FROM campaign_controls WHERE campaign_id=? AND silent=1))
+      AND ${siblingFence} ORDER BY created_at LIMIT 2`)
     .bind(config.campaignId, config.campaignId).all<{ notice_key: string }>();
   for (const row of pending.results) {
     const claim = crypto.randomUUID();
     const notice = await db.prepare(`UPDATE notices SET state='SENDING',claim_token=?,claimed_at=?
       WHERE notice_key=? AND state='PENDING' AND publication_hold=0
-        AND (chat_id>0 OR NOT EXISTS(SELECT 1 FROM campaign_controls WHERE campaign_id=? AND silent=1)) RETURNING chat_id,body,reply_message_id,reply_markup`)
+        AND (chat_id>0 OR NOT EXISTS(SELECT 1 FROM campaign_controls WHERE campaign_id=? AND silent=1))
+        AND ${siblingFence} RETURNING chat_id,body,reply_message_id,reply_markup`)
       .bind(claim, now, row.notice_key, config.campaignId).first<{ chat_id: number; body: string; reply_message_id: number | null; reply_markup: string | null }>();
     if (!notice) continue;
     // Final source/publication fence. A later D1 commit can still race the external API;
@@ -49,7 +63,7 @@ export async function deliverNotices(db: D1Database, config: Config, token: stri
     const permitted = await db.prepare(`SELECT 1 FROM notices WHERE notice_key=? AND state='SENDING' AND claim_token=?
       AND campaign_id=? AND publication_hold=0
       AND (chat_id>0 OR NOT EXISTS(SELECT 1 FROM campaign_controls WHERE campaign_id=? AND silent=1))
-      AND (notice_key NOT LIKE 'rejected:%' OR ${currentWarningSource})`)
+      AND (notice_key NOT LIKE 'rejected:%' OR (${currentWarningSource} AND NOT ${blockingSibling}))`)
       .bind(row.notice_key, claim, config.campaignId, config.campaignId).first();
     if (!permitted) {
       // Terminal known non-send, never SENT. Audit/state are atomic and claim-fenced.
@@ -65,6 +79,14 @@ export async function deliverNotices(db: D1Database, config: Config, token: stri
           sent_message_id=NULL,claim_token=NULL,claimed_at=NULL WHERE ${staleWarning}`)
           .bind(row.notice_key, config.campaignId, claim),
       ]);
+      // Refused with a current source and no policy reason: return the unused claim to PENDING
+      // without a new hold. The blocking sibling may have been triaged between the gate and this
+      // UPDATE; a concurrent ON/hold or a stale source still falls through to the paths below.
+      await db.prepare(`UPDATE notices SET state='PENDING',claim_token=NULL,claimed_at=NULL
+        WHERE notice_key=? AND campaign_id=? AND state='SENDING' AND claim_token=? AND publication_hold=0
+          AND (chat_id>0 OR NOT EXISTS(SELECT 1 FROM campaign_controls WHERE campaign_id=? AND silent=1))
+          AND (notice_key NOT LIKE 'rejected:%' OR ${currentWarningSource})`)
+        .bind(row.notice_key, config.campaignId, claim, config.campaignId).run();
       await db.prepare(`UPDATE notices SET state='PENDING',publication_hold=1,claim_token=NULL,claimed_at=NULL
         WHERE notice_key=? AND state='SENDING' AND claim_token=?`).bind(row.notice_key, claim).run();
       continue;
@@ -138,7 +160,15 @@ export async function handleAdmin(db: D1Database, config: Config, message: Teleg
   if (["/silent", "/reconcile", "/report_sent", "/report_retry", "/notice_sent", "/notice_retry"].includes(command)) {
     const recovery = await db.prepare("SELECT restored_at FROM recovery_state WHERE campaign_id=?")
       .bind(config.campaignId).first<{ restored_at: number }>();
-    if (recovery && message.date * 1000 <= recovery.restored_at) {
+    // The recovery rule applies to commands without a previously recorded decision;
+    // a decided report command keeps its saved outcome on redelivery.
+    const decided = recovery && (command === "/report_sent" || command === "/report_retry")
+      ? await db.prepare(`SELECT 1 FROM report_resolutions WHERE idempotency_key=?
+        UNION ALL SELECT 1 FROM operational_events WHERE event_key=? AND kind IN ('HELD_REPORT_RELEASE','REPORT_RESOLUTION_DENIED')
+        UNION ALL SELECT 1 FROM notices WHERE notice_key='admin:'||?`)
+        .bind(key, key, key).first()
+      : null;
+    if (recovery && !decided && message.date * 1000 <= recovery.restored_at) {
       await db.prepare(`INSERT INTO operational_events(event_key,campaign_id,kind,actor_id,source_chat_id,message_id,detail,created_at)
         VALUES(?,?,'STALE_RECOVERY_COMMAND',?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`)
         .bind(key, config.campaignId, actorId, message.chat.id, message.message_id,
@@ -233,8 +263,8 @@ export async function handleAdmin(db: D1Database, config: Config, message: Teleg
       if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !reason || reason.length > 1000
         || (sentId !== undefined && (!Number.isSafeInteger(sentId) || sentId <= 0))) reply = "Нужны день, корректный ID публикации (для report_sent) и причина после ручной проверки чата.";
       else {
-        const result = await resolveReport(db, config, { day, action: command === "/report_sent" ? "confirm_sent" : "retry", messageId: sentId, adminId: actorId, reason, idempotencyKey: key }, now);
-        reply = result ? `Решение по отчёту за ${day} сохранено: ${sentId === undefined ? "разрешена одна отправка" : "подтверждена публикация " + sentId}. Причина: ${reason}` : "Нет изменения: проверьте /reports. Во время тишины повтор не разрешается; SENT и отправляющийся отчёт не повторяются.";
+        const decision = await decideReport(db, config, { day, action: command === "/report_sent" ? "confirm_sent" : "retry", messageId: sentId, adminId: actorId, reason, idempotencyKey: key }, now);
+        reply = decision && decision.outcome !== "denied" ? `Решение по отчёту за ${day} сохранено: ${sentId === undefined ? "разрешена одна отправка" : "подтверждена публикация " + sentId}. Причина: ${reason}` : "Нет изменения: проверьте /reports. Во время тишины повтор не разрешается; SENT и отправляющийся отчёт не повторяются.";
       }
     } else if (command === "/notices") {
       const result = await db.prepare(`SELECT notice_key,chat_id,state,publication_hold,last_error FROM notices WHERE campaign_id=?
