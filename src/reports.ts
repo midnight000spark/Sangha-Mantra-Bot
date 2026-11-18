@@ -1,10 +1,15 @@
-import { releaseHeldReport } from "./controls";
+import { heldReleaseStatements } from "./controls";
 import { sendTelegramMessage } from "./telegram";
 import { addDays, dayBounds, latestReportDay, localDay } from "./time";
 import type { Config } from "./types";
 
 const REPORTS_PER_RUN = 7;
 const SEND_LEASE_MS = 120_000;
+
+// Any campaign source alias without a matching boundary blocks new snapshots, claims and
+// final send authorization. Evaluated inside each SQL statement, not only in preflight.
+const aliasBoundaryMissing = (campaign: string) => `EXISTS(SELECT 1 FROM chat_aliases a WHERE a.campaign_id=${campaign}
+  AND NOT EXISTS(SELECT 1 FROM automatic_intake_boundaries b WHERE b.campaign_id=a.campaign_id AND b.chat_id=a.chat_id))`;
 
 export interface DailyReport {
   campaign_id: string;
@@ -105,12 +110,13 @@ export async function runReports(
         ?, (SELECT report_chat_id FROM campaigns WHERE id = ?), ?, ?, ?,
         CASE WHEN EXISTS(SELECT 1 FROM campaign_controls WHERE campaign_id=? AND (silent=1 OR held_reports_through>=?)) THEN 1 ELSE 0 END
       FROM contributions WHERE campaign_id = ? AND original_date < ?
-      HAVING ? = ? OR EXISTS (SELECT 1 FROM daily_reports WHERE campaign_id = ? AND day = ?)`)
+      HAVING (? = ? OR EXISTS (SELECT 1 FROM daily_reports WHERE campaign_id = ? AND day = ?))
+        AND NOT ${aliasBoundaryMissing("?")}`)
       .bind(config.campaignId, day, config.timezone, start, end, clock(), start, start,
         config.campaignId, addDays(day, -1), config.goal, config.campaignId,
         restorationDay !== null && day < restorationDay ? 1 : 0,
         restorationDay !== null && day < restorationDay ? "UNCERTAIN" : "PENDING", clock(), config.campaignId, day,
-        config.campaignId, end, day, config.startDay, config.campaignId, addDays(day, -1)));
+        config.campaignId, end, day, config.startDay, config.campaignId, addDays(day, -1), config.campaignId));
     reconstructed.push(restorationDay !== null && day < restorationDay);
   }
 
@@ -137,6 +143,7 @@ export async function runReports(
         OR (status = 'FAILED_KNOWN' AND retry_after IS NOT NULL AND retry_after <= ?))
         AND NOT EXISTS (SELECT 1 FROM recovery_state WHERE campaign_id = ? AND reconciled_at IS NULL)
         AND NOT EXISTS (SELECT 1 FROM campaign_controls WHERE campaign_id = ? AND silent=1)
+        AND NOT ${aliasBoundaryMissing("daily_reports.campaign_id")}
       RETURNING ${reportColumns}`)
       .bind(report.body ?? formatReport(report), attempt, claimTime + SEND_LEASE_MS, claimTime,
         config.campaignId, report.day, claimTime, config.campaignId, config.campaignId).first<DailyReport>();
@@ -145,9 +152,30 @@ export async function runReports(
     const permitted = await db.prepare(`SELECT 1 FROM daily_reports WHERE campaign_id=? AND day=? AND status='SENDING'
       AND attempt_token=? AND publication_hold=0
       AND NOT EXISTS(SELECT 1 FROM campaign_controls WHERE campaign_id=? AND silent=1)
-      AND NOT EXISTS(SELECT 1 FROM recovery_state WHERE campaign_id=? AND reconciled_at IS NULL)`)
+      AND NOT EXISTS(SELECT 1 FROM recovery_state WHERE campaign_id=? AND reconciled_at IS NULL)
+      AND NOT ${aliasBoundaryMissing("daily_reports.campaign_id")}
+      AND target_chat_id=(SELECT report_chat_id FROM campaigns WHERE id=daily_reports.campaign_id)`)
       .bind(config.campaignId, report.day, attempt, config.campaignId, config.campaignId).first();
     if (!permitted) {
+      // One SQL result distinguishes a current token, policy denial and a temporary
+      // boundary/route refusal, so an unused claim is released without a new permanent hold.
+      const denial = await db.prepare(`SELECT publication_hold,
+        EXISTS(SELECT 1 FROM campaign_controls WHERE campaign_id=? AND silent=1) AS silent,
+        EXISTS(SELECT 1 FROM recovery_state WHERE campaign_id=? AND reconciled_at IS NULL) AS recovery_pending,
+        ${aliasBoundaryMissing("daily_reports.campaign_id")} AS boundary_missing,
+        target_chat_id<>(SELECT report_chat_id FROM campaigns WHERE id=daily_reports.campaign_id) AS route_changed
+        FROM daily_reports WHERE campaign_id=? AND day=? AND status='SENDING' AND attempt_token=?`)
+        .bind(config.campaignId, config.campaignId, config.campaignId, report.day, attempt)
+        .first<{ publication_hold: number; silent: number; recovery_pending: number; boundary_missing: number; route_changed: number }>();
+      if (denial && !denial.publication_hold && !denial.silent && !denial.recovery_pending
+        && (denial.boundary_missing || denial.route_changed)) {
+        // Known absence of an API call: release only this token; an already-set hold survives.
+        await db.prepare(`UPDATE daily_reports SET status='PENDING',attempt_token=NULL,lease_until=NULL,
+          last_error='Boundary or route gate refused send; Telegram API not called',updated_at=?
+          WHERE campaign_id=? AND day=? AND status='SENDING' AND attempt_token=?`)
+          .bind(clock(), config.campaignId, report.day, attempt).run();
+        continue;
+      }
       await db.prepare(`UPDATE daily_reports SET status='PENDING',publication_hold=1,attempt_token=NULL,lease_until=NULL,updated_at=?
         WHERE campaign_id=? AND day=? AND status='SENDING' AND attempt_token=?`)
         .bind(clock(), config.campaignId, report.day, attempt).run();
@@ -176,19 +204,32 @@ export async function runReports(
   return result;
 }
 
-export async function resolveReport(
+export interface ReportResolution {
+  day: string;
+  action: "confirm_sent" | "retry";
+  messageId?: number;
+  adminId: number;
+  reason: string;
+  idempotencyKey: string;
+}
+
+export interface ReportDecision {
+  outcome: "released" | "resolved" | "denied";
+  /** True only when this attempt first changed the durable outcome for the key. */
+  appliedNow: boolean;
+}
+
+/**
+ * The first successfully saved processing of a valid authorized command decides its key:
+ * applied (held release or terminal resolution) or denied. Later silence/state changes and
+ * redeliveries read that outcome; a full batch rollback leaves the key undecided.
+ */
+export async function decideReport(
   db: D1Database,
   config: Config,
-  resolution: {
-    day: string;
-    action: "confirm_sent" | "retry";
-    messageId?: number;
-    adminId: number;
-    reason: string;
-    idempotencyKey: string;
-  },
+  resolution: ReportResolution,
   nowMs = Date.now(),
-): Promise<boolean> {
+): Promise<ReportDecision | null> {
   if (!config.adminIds.includes(resolution.adminId)) throw new Error("Administrator is not authorized");
   if (!/^\d{4}-\d{2}-\d{2}$/.test(resolution.day)
     || !resolution.reason.trim() || resolution.reason.length > 1000
@@ -196,21 +237,55 @@ export async function resolveReport(
     || (resolution.action !== "confirm_sent" && resolution.action !== "retry")
     || (resolution.action === "confirm_sent" && (!Number.isSafeInteger(resolution.messageId) || resolution.messageId! <= 0))
     || (resolution.action === "retry" && resolution.messageId !== undefined)) {
-    return false;
+    return null;
   }
-  if (resolution.action === "retry" && await releaseHeldReport(db, config, resolution.day, resolution.adminId,
-    resolution.idempotencyKey, resolution.reason, nowMs)) return true;
+  const key = resolution.idempotencyKey;
+  // A legacy refusal saved only the admin answer; it still closes the key without parsing text.
+  const legacyAnswer = "NOT EXISTS(SELECT 1 FROM notices WHERE notice_key='admin:'||?)";
+  const held = resolution.action === "retry"
+    ? heldReleaseStatements(db, config, resolution.day, resolution.adminId, key, resolution.reason.trim(), nowMs, crypto.randomUUID())
+    : [];
   // The trigger applies the resolution in the same statement as its durable audit entry.
-  const applied = await db.batch([db.prepare(`INSERT OR IGNORE INTO report_resolutions
+  const terminal = db.prepare(`INSERT OR IGNORE INTO report_resolutions
     (idempotency_key, campaign_id, day, at, admin_id, action, reason, telegram_message_id, previous_state)
     SELECT ?, campaign_id, day, ?, ?, ?, ?, ?, status FROM daily_reports
     WHERE campaign_id = ? AND day = ? AND status IN ('UNCERTAIN', 'FAILED_KNOWN')
       AND (?='confirm_sent' OR NOT EXISTS(SELECT 1 FROM campaign_controls WHERE campaign_id=? AND silent=1))
-      AND NOT EXISTS(SELECT 1 FROM operational_events WHERE event_key=?)`)
-    .bind(resolution.idempotencyKey, nowMs, resolution.adminId, resolution.action,
-      resolution.reason.trim(), resolution.messageId ?? null, config.campaignId, resolution.day, resolution.action, config.campaignId, resolution.idempotencyKey),
-    db.prepare(`UPDATE daily_reports SET publication_hold=0 WHERE campaign_id=? AND day=? AND changes()=1`)
-      .bind(config.campaignId, resolution.day),
-  ]);
-  return (applied[0]?.meta.changes ?? 0) > 0;
+      AND NOT EXISTS(SELECT 1 FROM operational_events WHERE event_key=?)
+      AND ${legacyAnswer}`)
+    .bind(key, nowMs, resolution.adminId, resolution.action,
+      resolution.reason.trim(), resolution.messageId ?? null, config.campaignId, resolution.day, resolution.action, config.campaignId, key, key);
+  const holdClear = db.prepare(`UPDATE daily_reports SET publication_hold=0 WHERE campaign_id=? AND day=? AND changes()=1`)
+    .bind(config.campaignId, resolution.day);
+  const denied = db.prepare(`INSERT INTO operational_events(event_key,campaign_id,kind,actor_id,detail,created_at)
+    SELECT ?,?,'REPORT_RESOLUTION_DENIED',?,?,? WHERE NOT EXISTS(SELECT 1 FROM report_resolutions WHERE idempotency_key=?)
+      AND NOT EXISTS(SELECT 1 FROM operational_events WHERE event_key=?)
+      AND ${legacyAnswer}
+    ON CONFLICT(event_key) DO NOTHING`)
+    .bind(key, config.campaignId, resolution.adminId,
+      JSON.stringify({ day: resolution.day, action: resolution.action, messageId: resolution.messageId ?? null, reason: resolution.reason.trim() }),
+      nowMs, key, key, key);
+  const rows = await db.batch([...held, terminal, holdClear, denied]);
+  if ((rows[1]?.results.length ?? 0) > 0 && resolution.action === "retry") return { outcome: "released", appliedNow: true };
+  if ((rows[held.length]?.meta.changes ?? 0) > 0) return { outcome: "resolved", appliedNow: true };
+  // No effect in this batch: read the outcome already saved for this exact key.
+  const saved = await db.prepare(`SELECT action FROM report_resolutions WHERE idempotency_key=?`).bind(key).first<{ action: string }>();
+  if (saved) return { outcome: "resolved", appliedNow: false };
+  const receipt = await db.prepare(`SELECT kind FROM operational_events WHERE event_key=?
+    AND kind IN ('HELD_REPORT_RELEASE','REPORT_RESOLUTION_DENIED','STALE_RECOVERY_COMMAND')`).bind(key).first<{ kind: string }>();
+  if (receipt?.kind === "HELD_REPORT_RELEASE") return { outcome: "released", appliedNow: false };
+  if (receipt || await db.prepare(`SELECT 1 FROM notices WHERE notice_key='admin:'||?`).bind(key).first()) {
+    return { outcome: "denied", appliedNow: false };
+  }
+  return { outcome: "denied", appliedNow: (rows[held.length + 2]?.meta.changes ?? 0) > 0 };
+}
+
+export async function resolveReport(
+  db: D1Database,
+  config: Config,
+  resolution: ReportResolution,
+  nowMs = Date.now(),
+): Promise<boolean> {
+  const decision = await decideReport(db, config, resolution, nowMs);
+  return decision !== null && decision.outcome !== "denied" && decision.appliedNow;
 }
