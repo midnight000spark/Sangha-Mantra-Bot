@@ -322,3 +322,83 @@ test("F2 real D1: legacy unbound UNCERTAIN/SENT sibling blocks new bound revisio
     expect(await f2State(db, "bad")).toMatchObject({ state: "PENDING" });
   } finally { network.mockRestore(); await close(); }
 }, 30_000);
+
+/** One-shot pause before/after the first matching statement's .first(); deterministic SQL barriers. */
+function gateFirst(db: D1Database, pattern: string, afterRead: boolean, action: () => Promise<unknown>): D1Database {
+  let used = false;
+  return new Proxy(db, { get(target, prop) {
+    if (prop !== "prepare") { const value = Reflect.get(target, prop); return typeof value === "function" ? value.bind(target) : value; }
+    return (sql: string) => {
+      const original = target.prepare(sql);
+      if (!sql.includes(pattern)) return original;
+      const wrap = (statement: D1PreparedStatement): D1PreparedStatement => new Proxy(statement, { get(s, p) {
+        if (p === "bind") return (...values: unknown[]) => wrap(s.bind(...values as never[]));
+        if (p === "first") return async () => {
+          if (used) return s.first();
+          used = true;
+          if (afterRead) { const row = await s.first(); await action(); return row; }
+          await action(); return s.first();
+        };
+        const value = Reflect.get(s, p); return typeof value === "function" ? value.bind(s) : value;
+      } });
+      return wrap(original);
+    };
+  } });
+}
+
+for (const variant of ["legacy-triage-between-reads", "concurrent-on-between-reads"] as const) {
+  test(`R2 real D1: notice claim cancellation (${variant}) does not invent a permanent hold`, async () => {
+    const { db, close } = await openRuntime();
+    const calls: string[] = [];
+    const network = spyOn(globalThis, "fetch").mockImplementation((async (_url: unknown, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      if (body.chat_id < 0) calls.push(body.text);
+      return Response.json({ ok: true, result: { message_id: 900 + calls.length } });
+    }) as unknown as typeof fetch);
+    const { setTestSilence } = await import("./db");
+    let releaseA!: () => void; const aGate = new Promise<void>(resolve => { releaseA = resolve; });
+    let releaseB!: () => void; const bGate = new Promise<void>(resolve => { releaseB = resolve; });
+    let bClaimed!: () => void; const bClaimedSignal = new Promise<void>(resolve => { bClaimed = resolve; });
+    let bDone!: Promise<void>;
+    try {
+      await f2Input(db, "bad", "0"); // bound current invalid revision, older created_at
+      await db.prepare("INSERT INTO notices(notice_key,campaign_id,chat_id,reply_message_id,body,state,created_at) VALUES('rejected:legacy-10',?,-1001,10,'legacy warning','PENDING',?)")
+        .bind(testConfig.campaignId, f2Now + 1).run();
+      // Sender B: claims the legacy row, pauses at its final gate until A's gate read is done.
+      const dbB = gateFirst(gateFirst(db, "UPDATE notices SET state='SENDING'", true, async () => { bClaimed(); }),
+        "SELECT 1 FROM notices WHERE", false, async () => { releaseA(); await bGate; });
+      // Sender A: claims the bound row first; after its refused gate read, B's triage completes before cancellation.
+      const dbA = gateFirst(gateFirst(gateFirst(db, "UPDATE notices SET state='SENDING'", true, async () => {
+        bDone = deliverNotices(dbB, testConfig, "synthetic-token", f2Now);
+        await bClaimedSignal;
+      }), "SELECT 1 FROM notices WHERE", false, () => aGate),
+        "SELECT 1 FROM notices WHERE", true, async () => {
+          releaseB(); await bDone;
+          if (variant === "concurrent-on-between-reads") await setTestSilence(db, testConfig, true, 42, "r2-on", f2Now + 500);
+        });
+      await deliverNotices(dbA, testConfig, "synthetic-token", f2Now);
+      expect(calls).toEqual([]); // neither sender reached the API
+      expect(await db.prepare("SELECT state,sent_message_id FROM notices WHERE notice_key='rejected:legacy-10'").first())
+        .toEqual({ state: "FAILED_KNOWN", sent_message_id: null }); // legacy triage: known non-send
+      const bound = await db.prepare("SELECT state,publication_hold,claim_token FROM notices WHERE notice_key=?").bind(f2Key("bad")).first();
+      if (variant === "legacy-triage-between-reads") {
+        // The sibling no longer blocks at cancellation time: no new permanent hold.
+        expect(bound).toEqual({ state: "PENDING", publication_hold: 0, claim_token: null });
+        await deliverNotices(db, testConfig, "synthetic-token", f2Now + 1000);
+        expect(calls).toEqual(["warning:bad"]); // one automatic send, no manual /notice_retry
+        expect(await f2State(db, "bad")).toMatchObject({ state: "SENT" });
+        await deliverNotices(db, testConfig, "synthetic-token", f2Now + 2000);
+        expect(calls).toEqual(["warning:bad"]); // no second automatic call
+      } else {
+        // A concurrently committed /silent on keeps its real hold; OFF does not burst it.
+        expect(bound).toEqual({ state: "PENDING", publication_hold: 1, claim_token: null });
+        await deliverNotices(db, testConfig, "synthetic-token", f2Now + 1000);
+        expect(calls).toEqual([]);
+        await setTestSilence(db, testConfig, false, 42, "r2-off", f2Now + 1500);
+        await deliverNotices(db, testConfig, "synthetic-token", f2Now + 2000);
+        expect(calls).toEqual([]);
+        expect(await f2State(db, "bad")).toMatchObject({ state: "PENDING", publication_hold: 1 });
+      }
+    } finally { network.mockRestore(); await close(); }
+  }, 30_000);
+}

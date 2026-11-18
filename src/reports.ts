@@ -157,8 +157,10 @@ export async function runReports(
       AND target_chat_id=(SELECT report_chat_id FROM campaigns WHERE id=daily_reports.campaign_id)`)
       .bind(config.campaignId, report.day, attempt, config.campaignId, config.campaignId).first();
     if (!permitted) {
-      // One SQL result distinguishes a current token, policy denial and a temporary
-      // boundary/route refusal, so an unused claim is released without a new permanent hold.
+      // One SQL result distinguishes a lost claim (no row), a policy denial (hold/silent/recovery
+      // flags) and a temporary boundary/route refusal. The state may change between the gate and
+      // this read: decide by claim ownership and the absence of any policy reason NOW, not by the
+      // transient cause still being present, so a fixed boundary/route never invents a hold.
       const denial = await db.prepare(`SELECT publication_hold,
         EXISTS(SELECT 1 FROM campaign_controls WHERE campaign_id=? AND silent=1) AS silent,
         EXISTS(SELECT 1 FROM recovery_state WHERE campaign_id=? AND reconciled_at IS NULL) AS recovery_pending,
@@ -167,9 +169,8 @@ export async function runReports(
         FROM daily_reports WHERE campaign_id=? AND day=? AND status='SENDING' AND attempt_token=?`)
         .bind(config.campaignId, config.campaignId, config.campaignId, report.day, attempt)
         .first<{ publication_hold: number; silent: number; recovery_pending: number; boundary_missing: number; route_changed: number }>();
-      if (denial && !denial.publication_hold && !denial.silent && !denial.recovery_pending
-        && (denial.boundary_missing || denial.route_changed)) {
-        // Known absence of an API call: release only this token; an already-set hold survives.
+      if (denial && !denial.publication_hold && !denial.silent && !denial.recovery_pending) {
+        // Known absence of an API call: release only this token; a concurrently set hold survives.
         await db.prepare(`UPDATE daily_reports SET status='PENDING',attempt_token=NULL,lease_until=NULL,
           last_error='Boundary or route gate refused send; Telegram API not called',updated_at=?
           WHERE campaign_id=? AND day=? AND status='SENDING' AND attempt_token=?`)

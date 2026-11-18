@@ -618,3 +618,40 @@ test("F1-R4 real D1: legacy receipts and legacy refusal answers are honored; con
     expect(await db.prepare("SELECT COUNT(*) n FROM operational_events WHERE event_key='legacy-refusal' AND kind='STALE_RECOVERY_COMMAND'").first("n")).toBe(0);
   } finally { await runtime.dispose(); }
 }, 30_000);
+
+for (const variant of ["boundary-enrolled-between-reads", "concurrent-on-between-reads"] as const) {
+  test(`R1 real D1 + webhook: final-gate refusal cancellation (${variant}) keeps the correct hold semantics`, async () => {
+    const { runtime, db } = await runtimeDb(true);
+    let sends = 0;
+    const send = async () => { sends++; return { state: "SENT" as const, messageId: 1 }; };
+    try {
+      await readyPendingReport(db, now);
+      // Migration of a non-report source chat: a new alias without boundary, report route unchanged.
+      const beforeGate = withGate(db, "SELECT 1 FROM daily_reports WHERE", false, async () => {
+        expect((await post(runtime, migrationUpdate(940, now / 1000 + 1, -1002, -2001))).status).toBe(200);
+      });
+      // The state changes AFTER the gate refusal and BEFORE the classification read.
+      const controlled = withGate(beforeGate, "AS boundary_missing", false, async () => {
+        if (variant === "boundary-enrolled-between-reads") await enrollBoundary(db, -2001, now + 1500);
+        else await setSilence(db, config, true, 42, "r1-on", now + 1500);
+      });
+      await runReports(controlled, config, "test", now + 2000, send);
+      expect(sends).toBe(0);
+      expect(await db.prepare("SELECT COUNT(*) n FROM report_audit WHERE to_state='UNCERTAIN'").first("n")).toBe(0);
+      const row = await db.prepare("SELECT status,publication_hold,attempt_token,lease_until FROM daily_reports WHERE day='2026-11-10'").first();
+      if (variant === "boundary-enrolled-between-reads") {
+        // Temporary refusal must not become a permanent hold when the cause clears between reads.
+        expect(row).toEqual({ status: "PENDING", publication_hold: 0, attempt_token: null, lease_until: null });
+        await runReports(db, config, "test", now + 3000, send);
+        expect(sends).toBe(1); // one subsequent automatic send, no manual release needed
+        expect(await db.prepare("SELECT status,target_chat_id FROM daily_reports WHERE day='2026-11-10'").first())
+          .toEqual({ status: "SENT", target_chat_id: -1001 });
+      } else {
+        // A concurrently committed /silent on keeps its real hold.
+        expect(row).toEqual({ status: "PENDING", publication_hold: 1, attempt_token: null, lease_until: null });
+        await runReports(db, config, "test", now + 3000, send);
+        expect(sends).toBe(0);
+      }
+    } finally { await runtime.dispose(); }
+  }, 30_000);
+}

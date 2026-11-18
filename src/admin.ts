@@ -79,12 +79,13 @@ export async function deliverNotices(db: D1Database, config: Config, token: stri
           sent_message_id=NULL,claim_token=NULL,claimed_at=NULL WHERE ${staleWarning}`)
           .bind(row.notice_key, config.campaignId, claim),
       ]);
-      // Denied solely by another attempt on the same source: return the unused claim to
-      // PENDING without a new hold. A concurrent ON/hold or stale source falls through below.
+      // Refused with a current source and no policy reason: return the unused claim to PENDING
+      // without a new hold. The blocking sibling may have been triaged between the gate and this
+      // UPDATE; a concurrent ON/hold or a stale source still falls through to the paths below.
       await db.prepare(`UPDATE notices SET state='PENDING',claim_token=NULL,claimed_at=NULL
         WHERE notice_key=? AND campaign_id=? AND state='SENDING' AND claim_token=? AND publication_hold=0
           AND (chat_id>0 OR NOT EXISTS(SELECT 1 FROM campaign_controls WHERE campaign_id=? AND silent=1))
-          AND (notice_key NOT LIKE 'rejected:%' OR (${currentWarningSource} AND ${blockingSibling}))`)
+          AND (notice_key NOT LIKE 'rejected:%' OR ${currentWarningSource})`)
         .bind(row.notice_key, config.campaignId, claim, config.campaignId).run();
       await db.prepare(`UPDATE notices SET state='PENDING',publication_hold=1,claim_token=NULL,claimed_at=NULL
         WHERE notice_key=? AND state='SENDING' AND claim_token=?`).bind(row.notice_key, claim).run();
